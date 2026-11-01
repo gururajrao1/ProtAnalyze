@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Outputs (keep sample fasta, ignore generated annotations)
+protein_annotations.tsv
+*.tbl
+*.tblout
+
+# ESM / torch caches
+*.pt
+*.pth
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

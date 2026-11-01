@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protein Annotation Workbench</title>
+<meta name="description" content="Annotate hypothetical bacterial proteins: ProtParam physicochemistry, ESM-2 embeddings, HMMER homology and GO-term prediction.">
+<link rel="stylesheet" href="/static/styles.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to results</a>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">PA</span>
+    <div>
+      <p class="brand-title">Protein Annotation Workbench</p>
+      <p class="brand-sub">Hypothetical protein function prediction &middot; ProtParam + ESM-2 + HMMER + GO</p>
+    </div>
+  </div>
+  <div class="appbar-right">
+    <span id="backend-status" class="pill" role="status">Backend: checking&hellip;</span>
+    <details class="menu" id="export-menu">
+      <summary class="btn secondary" aria-haspopup="true">Export</summary>
+      <div class="menu-list" role="menu">
+        <button id="export-tsv" role="menuitem" disabled>Annotations (.tsv)</button>
+        <button id="export-json" role="menuitem" disabled>Full records (.json)</button>
+        <button id="export-fasta" role="menuitem" disabled>Cleaned sequences (.fasta)</button>
+      </div>
+    </details>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- Left: run setup + result list (Benchling-style project navigator). -->
+  <aside class="sidebar" aria-label="Run setup and proteins">
+    <section class="panel">
+      <h2>Run setup</h2>
+      <label class="field">FASTA file
+        <input type="file" id="fasta-file" accept=".fasta,.fa,.faa,.txt">
+      </label>
+      <label class="field">Or paste FASTA
+        <textarea id="fasta-text" rows="5" spellcheck="false" placeholder=">prot1&#10;MKTAYIAKQRQISFVKSHFSRQDILDLWQK..."></textarea>
+      </label>
+      <div class="field-row">
+        <label class="field">Top-K GO terms
+          <input type="number" id="top-k" value="3" min="1" max="12">
+        </label>
+        <label class="field">Embeddings
+          <select id="embed-mode">
+            <option value="hashed" selected>Offline (hashed)</option>
+            <option value="esm2_t6_8M_UR50D">ESM-2 8M</option>
+            <option value="esm2_t33_650M_UR50D">ESM-2 650M</option>
+          </select>
+        </label>
+      </div>
+      <details class="field">
+        <summary>HMMER reference database (optional)</summary>
+        <textarea id="hmmer-db" rows="3" spellcheck="false" placeholder="Paste reference FASTA for phmmer&#10;search, or leave empty to skip."></textarea>
+      </details>
+      <div class="btn-row">
+        <button id="annotate-btn" class="btn primary">Annotate</button>
+        <button id="demo-btn" class="btn ghost" type="button">Load demo</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <p id="error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="panel grow">
+      <h2>Proteins <span id="protein-count" class="muted"></span></h2>
+      <label class="field search">
+        <span class="visually-hidden">Filter proteins</span>
+        <input type="search" id="protein-filter" placeholder="Filter by ID or function&hellip;" disabled>
+      </label>
+      <ul id="protein-list" role="listbox" aria-label="Annotated proteins" tabindex="0"></ul>
+    </section>
+  </aside>
+
+  <!-- Center: tabbed protein detail (Geneious-style viewer). -->
+  <main id="main" class="detail" aria-label="Protein detail" tabindex="-1">
+    <div id="empty" class="empty">
+      <h2>Annotate proteins to begin</h2>
+      <ol>
+        <li>Upload a multi-FASTA file of hypothetical proteins, paste sequences, or load the demo.</li>
+        <li>Choose embeddings (offline hashed for speed, ESM-2 for precision) and press Annotate.</li>
+        <li>Select a protein to inspect its sequence, property tracks, GO terms and homology.</li>
+      </ol>
+      <p class="muted">Ambiguous residues (X, B, Z, U, O) are substituted and masked automatically.</p>
+    </div>
+
+    <div id="detail" hidden>
+      <div class="detail-head">
+        <div>
+          <h2 id="prot-title"></h2>
+          <p id="prot-badges" class="badges"></p>
+          <p id="prot-func" class="func"></p>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Protein views">
+        <button role="tab" id="tab-overview" aria-controls="panel-overview" aria-selected="true">Overview</button>
+        <button role="tab" id="tab-sequence" aria-controls="panel-sequence" aria-selected="false" tabindex="-1">Sequence</button>
+        <button role="tab" id="tab-tracks" aria-controls="panel-tracks" aria-selected="false" tabindex="-1">Property tracks</button>
+        <button role="tab" id="tab-composition" aria-controls="panel-composition" aria-selected="false" tabindex="-1">Composition</button>
+      </div>
+
+      <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+        <h3>Predicted Gene Ontology terms</h3>
+        <p class="muted small">Ranked by model confidence. IDs link to AmiGO 2. Namespaces: MF molecular function, BP biological process, CC cellular component.</p>
+        <table class="data" id="go-table">
+          <thead><tr><th scope="col">Term</th><th scope="col">GO ID</th><th scope="col">Namespace</th><th scope="col">Confidence</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h3>Physicochemical properties</h3>
+        <dl class="props" id="props-grid"></dl>
+      </section>
+
+      <section id="panel-sequence" role="tabpanel" aria-labelledby="tab-sequence" hidden>
+        <div class="seq-toolbar">
+          <h3>Sequence viewer</h3>
+          <span id="sel-readout" class="muted small" role="status">No selection</span>
+          <span class="spacer"></span>
+          <button id="copy-seq" class="btn secondary small" type="button">Copy sequence</button>
+          <button id="copy-sel" class="btn secondary small" type="button" disabled>Copy selection</button>
+        </div>
+        <p class="muted small">Residues coloured by property. Click and drag to select a region; coordinates are 1-based.</p>
+        <div id="seq-viewer" class="seq" aria-label="Annotated amino acid sequence"></div>
+        <div class="legend" aria-label="Residue colour legend">
+          <span class="chip hydrophobic">Hydrophobic</span>
+          <span class="chip polar">Polar</span>
+          <span class="chip positive">Positive</span>
+          <span class="chip negative">Negative</span>
+          <span class="chip special">Special / masked</span>
+        </div>
+      </section>
+
+      <section id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden>
+        <h3>Hydrophobicity and charge</h3>
+        <p class="muted small">Kyte&ndash;Doolittle hydrophobicity (raw and 5-residue smoothed) with per-residue charge. Hover for exact values.</p>
+        <div id="tracks-chart"></div>
+        <p id="tracks-fallback" class="muted" hidden>Charts need the Plotly CDN. Per-residue values remain available in the JSON export.</p>
+      </section>
+
+      <section id="panel-composition" role="tabpanel" aria-labelledby="tab-composition" hidden>
+        <h3>Amino acid composition</h3>
+        <div id="aa-chart"></div>
+        <table class="data compact" id="aa-table">
+          <thead><tr><th scope="col">Residue</th><th scope="col">Fraction</th><th scope="col">Count</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </div>
+  </main>
+
+  <!-- Right: inspector with evidence and run provenance. -->
+  <aside class="inspector" aria-label="Evidence inspector">
+    <section class="panel">
+      <h2>Homology (HMMER)</h2>
+      <div id="hmmer-body"><p class="muted">No run yet.</p></div>
+    </section>
+    <section class="panel">
+      <h2>Run provenance</h2>
+      <dl class="kv" id="provenance"><dt class="muted">No run yet.</dt></dl>
+    </section>
+    <section class="panel">
+      <h2>About this prediction</h2>
+      <p class="small">GO confidences come from a multilabel head over fused ESM-2 and ProtParam features. This build ships demonstration weights: treat scores as ranking signals and confirm hits against HMMER homology and the literature before reporting a function.</p>
+    </section>
+  </aside>
+</div>
+
+<footer class="statusbar" aria-label="Run status">
+  <span id="run-summary">Idle. Configure a run in the left panel.</span>
+  <span id="run-meta" class="muted"></span>
+</footer>
+
+<script src="/static/app.js" defer></script>
+<noscript><p style="padding:1rem">This workbench needs JavaScript for the interactive viewer. The CLI still works: see README.</p></noscript>
+</body>
+</html>
