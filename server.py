@@ -35,14 +35,19 @@ from fastapi.staticfiles import StaticFiles
 
 from protein_annotation.embeddings import DEFAULT_ESM_MODEL, embed_sequences
 from protein_annotation.hmmer import HmmerHit, hmmer_available, run_phmmer, top_hit_per_query
-from protein_annotation.model import GO_IDS, GO_TERMS, GOClassifier
+from protein_annotation.model import GO_IDS, GO_TERMS, GOClassifier, cafa_eval_report
 from protein_annotation.pipeline import (
     TSV_COLUMNS,
     AnnotationRecord,
     annotate_records,
     describe_function,
+    load_eval_labels,
 )
-from protein_annotation.sequence import clean_sequence, compute_protparam_features
+from protein_annotation.sequence import (
+    clean_sequence,
+    compute_protparam_features,
+    disorder_scores,
+)
 
 # Kyte-Doolittle hydrophobicity scale for per-residue tracks.
 KD_SCALE: dict[str, float] = {
@@ -64,6 +69,19 @@ for _aa in "STNQ":
     AA_CLASS[_aa] = "polar"
 for _aa in "CHPG":
     AA_CLASS[_aa] = "special"
+
+def is_vfdb_hit(target_id: str) -> bool:
+    """True when a HMMER target id looks like a VFDB virulence factor (VFG...)."""
+    tid = target_id.strip().split()[0].split("|")[0] if target_id.strip() else ""
+    return tid.upper().startswith("VFG")
+
+
+def hmmer_db_kind(hmmer_db_text: str | None) -> str:
+    """Classify the pasted reference DB: 'vfdb' when headers carry VFG ids."""
+    if not hmmer_db_text or not hmmer_db_text.strip():
+        return "none"
+    return "vfdb" if ">VFG" in hmmer_db_text.upper() else "custom"
+
 
 app = FastAPI(title="Protein Annotation Workbench", version="0.2.0")
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
@@ -95,8 +113,9 @@ def annotate_fasta_text(
     esm_model: str = DEFAULT_ESM_MODEL,
     force_fallback: bool = True,
     hmmer_db_text: str | None = None,
-) -> tuple[list[AnnotationRecord], list[dict]]:
-    """Annotate FASTA text, returning TSV records + rich per-protein detail."""
+    eval_labels_text: str | None = None,
+) -> tuple[list[AnnotationRecord], list[dict], dict | None]:
+    """Annotate FASTA text, returning TSV records + rich detail + CAFA eval."""
     parsed = list(SeqIO.parse(io.StringIO(fasta_text), "fasta"))
     if not parsed:
         raise ValueError("No FASTA records found in input")
@@ -122,6 +141,22 @@ def annotate_fasta_text(
             warnings.warn("phmmer binary not found; skipping HMMER step")
     classifier = GOClassifier(input_dim=embedding.dim + len(features[0].to_vector()))
     records = annotate_records(cleaned, features, embedding, hmmer_best, classifier, top_k)
+
+    # Optional CAFA eval report over pasted labels TSV (protein_id<TAB>GO:1,GO:2).
+    eval_report: dict | None = None
+    if eval_labels_text and eval_labels_text.strip():
+        prot_vectors = np.array([f.to_vector() for f in features], dtype=np.float32)
+        combined = np.concatenate([embedding.embeddings.astype(np.float32), prot_vectors], axis=1)
+        head = classifier
+        if head.input_dim != combined.shape[1]:
+            head = GOClassifier(
+                input_dim=combined.shape[1], go_ids=head.go_ids, thresholds=head.thresholds
+            )
+        with tempfile.TemporaryDirectory() as tmp:
+            labels_path = Path(tmp) / "labels.tsv"
+            labels_path.write_text(eval_labels_text, encoding="utf-8")
+            Y_true = load_eval_labels(labels_path, [c.record_id for c in cleaned], head.go_ids)
+        eval_report = cafa_eval_report(Y_true, head.predict_proba(combined), go_ids=head.go_ids)
 
     # Rich detail payload for the domain UI.
     detail: list[dict] = []
@@ -153,6 +188,9 @@ def annotate_fasta_text(
                 "sequence": seq.cleaned,
                 "aa_class": [AA_CLASS.get(aa, "special") for aa in seq.cleaned],
                 "tracks": tracks,
+                "disorder": [round(s, 3) for s in disorder_scores(seq.cleaned)],
+                "disordered_fraction": rec.disordered_fraction,
+                "embedding_source": rec.embedding_source,
                 "aa_freq": {k: round(float(v), 4) for k, v in sorted(feat.aa_freq.items())},
                 "go_terms": go_terms,
                 "hmmer": (
@@ -161,10 +199,11 @@ def annotate_fasta_text(
                     else None
                 ),
                 "hmmer_hit": rec.hmmer_hit,
+                "vfdb": bool(hit and is_vfdb_hit(hit.target_id)),
                 "predicted_function": rec.predicted_function,
             }
         )
-    return records, detail
+    return records, detail, eval_report
 
 
 def records_to_tsv(records: list[AnnotationRecord]) -> str:
@@ -194,6 +233,7 @@ async def annotate(
     file: UploadFile | None = File(default=None),
     fasta: str | None = Form(default=None),
     hmmer_db: str | None = Form(default=None),
+    eval_labels: str | None = Form(default=None),
     top_k: int = Form(default=3),
     no_esm: bool = Form(default=True),
     esm_model: str = Form(default=DEFAULT_ESM_MODEL),
@@ -210,12 +250,13 @@ async def annotate(
     top_k = max(1, min(int(top_k), len(GO_IDS)))
     started = time.perf_counter()
     try:
-        records, detail = annotate_fasta_text(
+        records, detail, eval_report = annotate_fasta_text(
             fasta_text,
             top_k=top_k,
             esm_model=esm_model,
             force_fallback=bool(no_esm),
             hmmer_db_text=hmmer_db,
+            eval_labels_text=eval_labels,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -226,9 +267,13 @@ async def annotate(
         "esm_model": esm_model,
         "hmmer_available": hmmer_available(),
         "hmmer_db_provided": bool(hmmer_db and hmmer_db.strip()),
+        "hmmer_db_kind": hmmer_db_kind(hmmer_db),
         "hmmer_hits": sum(1 for r in records if r.hmmer_hit != "-"),
+        "vfdb_hits": sum(1 for d in detail if d["vfdb"]),
         "go_terms": len(GO_IDS),
+        "go_weights": "demo random-init (untrained)",
         "top_k": top_k,
+        "eval": eval_report,
         "elapsed_s": time.perf_counter() - started,
     }
     return JSONResponse(

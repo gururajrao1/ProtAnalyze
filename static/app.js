@@ -89,6 +89,7 @@ async function runAnnotate() {
     fd.append("no_esm", mode === "hashed" ? "true" : "false");
     fd.append("esm_model", mode === "hashed" ? "esm2_t6_8M_UR50D" : mode);
     fd.append("hmmer_db", $("hmmer-db").value);
+    fd.append("eval_labels", $("eval-labels").value);
     const r = await fetch("/annotate", { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -171,11 +172,18 @@ function renderDetail(rec) {
   $("empty").hidden = true;
   $("detail").hidden = false;
   $("prot-title").textContent = rec.protein_id;
+  const embLabel = rec.embedding_source === "hashed-fallback" ? "hashed embeddings"
+    : rec.embedding_source ? String(rec.embedding_source).replace("esm2:", "ESM-2 ") : "";
+  const disBadge = (rec.disordered_fraction === null || rec.disordered_fraction === undefined) ? ""
+    : `<span class="tag${rec.disordered_fraction >= 0.5 ? " warn" : ""}">disorder ${(rec.disordered_fraction * 100).toFixed(1)}%</span>`;
   $("prot-badges").innerHTML =
     `<span class="tag">${rec.length} aa</span>` +
     `<span class="tag">${rec.molecular_weight.toFixed(2)} Da</span>` +
     `<span class="tag">pI ${rec.isoelectric_point.toFixed(2)}</span>` +
-    (rec.n_masked ? `<span class="tag">${rec.n_masked} masked</span>` : "");
+    (rec.n_masked ? `<span class="tag">${rec.n_masked} masked</span>` : "") +
+    (embLabel ? `<span class="tag">${esc(embLabel)}</span>` : "") +
+    disBadge +
+    (rec.vfdb ? `<span class="tag vfdb">VFDB virulence hit</span>` : "");
   $("prot-func").textContent = rec.predicted_function;
   renderGoTable(rec);
   renderProps(rec);
@@ -219,6 +227,9 @@ function renderProps(rec) {
     ["Instability index", rec.instability_index.toFixed(2)],
     ["Aliphatic index", rec.aliphatic.toFixed(2)],
     ["Masked residues", String(rec.n_masked)],
+    ["Disordered fraction", (rec.disordered_fraction === null || rec.disordered_fraction === undefined)
+      ? "n/a" : `${(rec.disordered_fraction * 100).toFixed(1)}%`],
+    ["Embedding source", rec.embedding_source || "n/a"],
   ];
   $("props-grid").innerHTML =
     rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("");
@@ -227,7 +238,9 @@ function renderProps(rec) {
 function renderHmmer(rec) {
   const body = $("hmmer-body");
   if (rec.hmmer) {
-    body.innerHTML = `<dl class="kv">` +
+    body.innerHTML =
+      (rec.vfdb ? `<p><span class="tag vfdb">VFDB virulence factor</span></p>` : "") +
+      `<dl class="kv">` +
       `<dt>Target</dt><dd>${esc(rec.hmmer.target)}</dd>` +
       `<dt>E-value</dt><dd>${esc(fmtEvalue(rec.hmmer.evalue))}</dd>` +
       `<dt>Bit score</dt><dd>${esc(String(rec.hmmer.bitscore))}</dd></dl>`;
@@ -242,18 +255,45 @@ function renderProvenance() {
   const m = state.meta;
   const dl = $("provenance");
   if (!m) { dl.innerHTML = `<dt class="muted">No run yet.</dt>`; return; }
+  const hmmerDb = m.hmmer_db_kind === "vfdb" ? "VFDB virulence tier"
+    : m.hmmer_db_kind === "custom" ? "custom FASTA" : "none";
   const rows = [
     ["Proteins", String(m.n_proteins)],
     ["Embeddings", m.embeddings],
     ["ESM-2 model", m.esm_model],
-    ["HMMER", m.hmmer_available ? (m.hmmer_db_provided ? `phmmer (${m.hmmer_hits} hits)` : "binary ready, no DB given") : "unavailable (skipped)"],
+    ["HMMER", m.hmmer_available ? (m.hmmer_db_provided ? `phmmer (${m.hmmer_hits} hits, DB: ${hmmerDb})` : "binary ready, no DB given") : "unavailable (skipped)"],
+    ["VFDB hits", String(m.vfdb_hits || 0)],
     ["GO label space", `${m.go_terms} terms`],
+    ["GO weights", m.go_weights || "demo random-init (untrained)"],
     ["Top-K", String(m.top_k)],
     ["Thresholds", "default 0.5 (demo weights, untuned)"],
+    ["CAFA eval", m.eval ? `Fmax ${m.eval.fmax} · Smin ${m.eval.smin} · AUPR ${m.eval.aupr_micro}` : "no labels supplied"],
     ["Server time", `${m.elapsed_s.toFixed(2)}s`],
   ];
   dl.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
   $("run-meta").textContent = `${m.embeddings} · ${m.esm_model}`;
+  renderEval(m.eval);
+}
+
+function renderEval(ev) {
+  const body = $("eval-body");
+  if (!ev) {
+    body.innerHTML = `<p class="muted small">No eval labels supplied for this run. ` +
+      `Paste <code>protein_id&lt;TAB&gt;GO:1,GO:2</code> lines in Run setup to score ` +
+      `Fmax / Smin / AUPR.</p>`;
+    return;
+  }
+  const perTerm = ev.per_term.map((t) =>
+    `<tr><td><code>${esc(t.go_id)}</code></td><td class="num">${t.f1.toFixed(4)}</td>` +
+    `<td class="num">${t.threshold.toFixed(2)}</td></tr>`).join("");
+  body.innerHTML = `<dl class="kv">` +
+    `<dt>Fmax (protein-centric)</dt><dd>${ev.fmax.toFixed(4)} @ ${ev.fmax_threshold.toFixed(2)}</dd>` +
+    `<dt>Smin (semantic distance)</dt><dd>${ev.smin.toFixed(4)} @ ${ev.smin_threshold.toFixed(2)}</dd>` +
+    `<dt>Micro-AUPR</dt><dd>${ev.aupr_micro.toFixed(4)}</dd>` +
+    `<dt>Proteins / terms</dt><dd>${ev.n_proteins} / ${ev.n_terms}</dd></dl>` +
+    `<table class="data compact"><thead><tr><th scope="col">Term</th>` +
+    `<th scope="col" class="num">Best F1</th><th scope="col" class="num">Thr</th></tr></thead>` +
+    `<tbody>${perTerm}</tbody></table>`;
 }
 
 /* ---------- sequence viewer ---------- */
@@ -365,24 +405,38 @@ function withPlotly(fn) {
 function renderTracks(rec) {
   withPlotly(() => {
     const x = rec.sequence.split("").map((_, i) => i + 1);
+    const disorder = Array.isArray(rec.disorder) ? rec.disorder : [];
     const layout = {
       margin: { t: 20, l: 48, r: 12, b: 42 },
-      grid: { rows: 2, columns: 1, pattern: "independent" },
-      xaxis: { title: "position", matches: "x2" },
-      yaxis: { title: "KD", domain: [0.55, 1] },
-      xaxis2: { title: "position", anchor: "y2" },
-      yaxis2: { title: "charge", domain: [0, 0.32], tickvals: [-1, 0, 1] },
-      legend: { orientation: "h", y: 1.06 },
+      height: 520,
+      grid: { rows: 3, columns: 1, pattern: "independent" },
+      xaxis: { matches: "x3" },
+      yaxis: { title: "KD", domain: [0.68, 1] },
+      xaxis2: { matches: "x3" },
+      yaxis2: { title: "charge", domain: [0.4, 0.58], tickvals: [-1, 0, 1] },
+      xaxis3: { title: "position", anchor: "y3" },
+      yaxis3: { title: "disorder", domain: [0, 0.26], range: [0, 1] },
+      legend: { orientation: "h", y: 1.04 },
       hovermode: "x unified",
     };
-    Plotly.newPlot("tracks-chart", [
+    const traces = [
       { x, y: rec.tracks.hydro, xaxis: "x", yaxis: "y", type: "scatter",
         mode: "lines", name: "KD raw", line: { color: "#9aa7b3", width: 1 } },
       { x, y: rec.tracks.hydro_smooth, xaxis: "x", yaxis: "y", type: "scatter",
         mode: "lines", name: "KD smoothed (w=5)", line: { color: "#0b63ce", width: 2 } },
       { x, y: rec.tracks.charge, xaxis: "x2", yaxis: "y2", type: "bar",
         name: "charge", marker: { color: "#1a7f4b" } },
-    ], layout, { responsive: true, displaylogo: false });
+    ];
+    if (disorder.length === x.length) {
+      traces.push(
+        { x, y: disorder, xaxis: "x3", yaxis: "y3", type: "scatter",
+          mode: "lines", name: "disorder (w=9)", line: { color: "#b35409", width: 2 } },
+        { x: [x[0], x[x.length - 1]], y: [0.5, 0.5], xaxis: "x3", yaxis: "y3",
+          type: "scatter", mode: "lines", name: "disordered ≥ 0.5",
+          line: { color: "#b4232a", width: 1, dash: "dash" } },
+      );
+    }
+    Plotly.newPlot("tracks-chart", traces, layout, { responsive: true, displaylogo: false });
   });
 }
 

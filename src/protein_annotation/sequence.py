@@ -24,6 +24,20 @@ AA_ORDER: list[str] = list("ACDEFGHIKLMNPQRSTVWY")
 _ALIPHATIC_A: float = 2.9
 _ALIPHATIC_B: float = 3.9
 
+# Per-residue disorder propensity (TOP-IDP-inspired, 0=order-prone .. 1=disorder-prone).
+# Disorder-promoting: P/E/K/S/Q/G; order-promoting: W/F/Y/L/I/V. Used by the
+# lightweight IUPred3-style statistical-potential fallback (pure CPU, offline).
+DISORDER_PROPENSITY: dict[str, float] = {
+    "P": 1.00, "E": 0.87, "K": 0.84, "S": 0.81, "Q": 0.73,
+    "G": 0.66, "D": 0.63, "N": 0.61, "T": 0.59, "A": 0.52,
+    "H": 0.51, "R": 0.50, "M": 0.39, "C": 0.36, "V": 0.33,
+    "I": 0.31, "Y": 0.30, "F": 0.28, "L": 0.27, "W": 0.25,
+}
+
+# Default smoothing window and binarisation threshold for disorder_fraction().
+DISORDER_WINDOW: int = 9
+DISORDER_THRESHOLD: float = 0.5
+
 
 @dataclass
 class CleanedSequence:
@@ -71,6 +85,48 @@ def clean_sequence(record_id: str, sequence: str) -> CleanedSequence:
     return CleanedSequence(
         record_id=record_id, raw=sequence, cleaned="".join(cleaned_chars), mask=mask
     )
+
+
+def disorder_scores(sequence: str, window: int = DISORDER_WINDOW) -> list[float]:
+    """Per-residue disorder score via smoothed propensity (IUPred3-style).
+
+    Each residue maps to DISORDER_PROPENSITY and scores are smoothed with a
+    centered moving average (edge-shrunk). Pure CPU, no dependencies.
+
+    Args:
+        sequence: Cleaned (standard-AA) protein string.
+        window: Smoothing window width (odd preferred).
+
+    Returns:
+        One score in [0, 1] per residue (empty input -> empty list).
+    """
+    raw: list[float] = [DISORDER_PROPENSITY.get(aa, 0.5) for aa in sequence.upper()]
+    if window <= 1 or not raw:
+        return raw
+    half: int = window // 2
+    smoothed: list[float] = []
+    for i in range(len(raw)):
+        lo: int = max(0, i - half)
+        hi: int = min(len(raw), i + half + 1)
+        smoothed.append(sum(raw[lo:hi]) / (hi - lo))
+    return smoothed
+
+
+def disorder_fraction(
+    sequence: str,
+    window: int = DISORDER_WINDOW,
+    threshold: float = DISORDER_THRESHOLD,
+) -> float:
+    """Fraction of residues scored disordered (>= threshold after smoothing).
+
+    High values flag intrinsically disordered / hypothetical proteins whose
+    function predictions deserve lower confidence. Empty input -> 0.0.
+    """
+    scores: list[float] = disorder_scores(sequence, window=window)
+    if not scores:
+        return 0.0
+    n_disordered: int = sum(1 for s in scores if s >= threshold)
+    return n_disordered / len(scores)
 
 
 def aliphatic_index(aa_percent: dict[str, float]) -> float:

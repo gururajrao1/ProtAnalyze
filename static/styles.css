@@ -147,6 +147,12 @@ details.field summary { cursor: pointer; color: var(--accent); }
 .badges .tag {
   font-size: 0.75rem; background: #eef2f6; border-radius: 4px; padding: 0.15rem 0.5rem;
 }
+/* Shared tag (also used in the inspector) + signal badges. */
+.tag {
+  font-size: 0.75rem; background: #eef2f6; border-radius: 4px; padding: 0.15rem 0.5rem;
+}
+.tag.warn { background: #fdf0d7; color: #7a4a08; font-weight: 700; }
+.tag.vfdb { background: #f8dbdc; color: #7a1f24; font-weight: 700; }
 .func { font-size: 0.9rem; margin: 0.2rem 0 0.6rem; }
 .tabs { display: flex; gap: 2px; border-bottom: 2px solid var(--line); margin-bottom: 0.9rem; }
 .tabs [role="tab"] {

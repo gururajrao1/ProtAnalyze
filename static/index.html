@@ -57,7 +57,11 @@
       </div>
       <details class="field">
         <summary>HMMER reference database (optional)</summary>
-        <textarea id="hmmer-db" rows="3" spellcheck="false" placeholder="Paste reference FASTA for phmmer&#10;search, or leave empty to skip."></textarea>
+        <textarea id="hmmer-db" rows="3" spellcheck="false" placeholder="Paste reference FASTA for phmmer&#10;search — e.g. VFDB_setA_pro.fas for the&#10;virulence tier — or leave empty to skip."></textarea>
+      </details>
+      <details class="field">
+        <summary>CAFA eval labels (optional)</summary>
+        <textarea id="eval-labels" rows="3" spellcheck="false" placeholder="protein_id&#9;GO:0003824,GO:0005524&#10;one line per protein"></textarea>
       </details>
       <div class="btn-row">
         <button id="annotate-btn" class="btn primary">Annotate</button>
@@ -136,8 +140,8 @@
       </section>
 
       <section id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden>
-        <h3>Hydrophobicity and charge</h3>
-        <p class="muted small">Kyte&ndash;Doolittle hydrophobicity (raw and 5-residue smoothed) with per-residue charge. Hover for exact values.</p>
+        <h3>Hydrophobicity, charge and disorder</h3>
+        <p class="muted small">Kyte&ndash;Doolittle hydrophobicity (raw and 5-residue smoothed), per-residue charge, and IUPred3-style disorder propensity (dashed line marks the 0.5 disordered threshold). Hover for exact values.</p>
         <div id="tracks-chart"></div>
         <p id="tracks-fallback" class="muted" hidden>Charts need the Plotly CDN. Per-residue values remain available in the JSON export.</p>
       </section>
@@ -158,6 +162,10 @@
     <section class="panel">
       <h2>Homology (HMMER)</h2>
       <div id="hmmer-body"><p class="muted">No run yet.</p></div>
+    </section>
+    <section class="panel">
+      <h2>CAFA evaluation</h2>
+      <div id="eval-body"><p class="muted">No eval labels supplied.</p></div>
     </section>
     <section class="panel">
       <h2>Run provenance</h2>

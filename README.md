@@ -43,16 +43,26 @@ uvicorn server:app --reload
 
 Benchling/Geneious-style workbench: run setup + searchable protein
 navigator (left), tabbed viewer with GO evidence table, ruler-based sequence
-viewer with region selection, stacked hydrophobicity/charge tracks and AA
-composition (center), homology + run-provenance inspector (right), export menu
-(TSV/JSON/FASTA), and a status bar. No Streamlit.
+viewer with region selection, stacked hydrophobicity/charge/disorder
+tracks and AA composition (center), homology + CAFA eval +
+run-provenance inspector (right), export menu (TSV/JSON/FASTA), and a
+status bar. No Streamlit.
+
+Per-protein badges surface the embedding source (`hashed`/`ESM-2`),
+disordered fraction (flagged at ≥50%), and VFDB virulence hits; the
+inspector shows the HMMER DB kind, GO-weights provenance, and an
+optional CAFA report (Fmax/Smin/AUPR + per-term F1).
 
 API:
 
 - `GET /health` — liveness + capability flags
 - `POST /annotate` — multipart `file` (FASTA) or `fasta` text field,
-  plus `top_k`, `no_esm`, `esm_model`, `hmmer_db` (reference FASTA text);
+  plus `top_k`, `no_esm`, `esm_model`, `hmmer_db` (reference FASTA text),
+  `eval_labels` (labels TSV text: `protein_id<TAB>GO:1,GO:2`);
   returns `{records: [...], tsv: "...", columns: [...], meta: {...}}`
+  where each record carries `disorder`, `disordered_fraction`,
+  `embedding_source`, `vfdb`, and `meta` carries `hmmer_db_kind`,
+  `vfdb_hits`, `go_weights`, and `eval` (null without labels)
 
 ## CLI usage
 
@@ -65,7 +75,44 @@ python -m protein_annotation hypothetical_proteins.fasta --hmmer-db reference.fa
 
 # Large ESM-2 model
 python -m protein_annotation hypothetical_proteins.fasta --esm-model esm2_t33_650M_UR50D
+
+# Extended TSV (+Disordered_Fraction, +Embedding_Source), no disorder signal
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --extended-tsv
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --no-disorder
+
+# Trained GO head + CAFA eval sidecar
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --go-weights data/head \
+    --eval-labels labels.tsv --eval-report eval.json
 ```
+
+## Virulence tier (VFDB)
+
+The existing `--hmmer-db` path doubles as a VFDB virulence tier with no
+pipeline change — pass a VFDB FASTA as the reference database:
+
+```bash
+bash scripts/fetch_vfdb.sh            # or: powershell -File scripts\fetch_vfdb.ps1
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --hmmer-db data/vfdb/VFDB_setA_pro.fas
+```
+
+VFDB data is CC BY-NC 4.0 (research/non-profit use only). Hits land in the
+unchanged `HMMER_Top_Hit` column; without `phmmer` the step warns and skips.
+
+## Real GO labels + trained head
+
+`scripts/build_go_labels.py` filters a GOA GAF to bacterial experimental
+annotations, true-path propagates via `go-basic.obo`, frequency-prunes to
+100–500 terms, and writes a terms JSON plus an optional labels NPZ:
+
+```bash
+python scripts/build_go_labels.py goa_uniprot_all.gaf.gz go-basic.obo \
+    --out-terms data/go_bacterial_terms.json --out-labels data/go_labels.npz
+```
+
+Train with `GOClassifier.fit`, persist with `save_weights`, and reuse with
+`--go-weights data/head` (or `--go-terms` for the label space alone). The
+CAFA report (`--eval-report`) scores Fmax/Smin/micro-AUPR plus per-term F1
+against a labels TSV (`protein_id<TAB>GO:1,GO:2`).
 
 Run from the repo root with `PYTHONPATH=src`, or `pip install -e .` if you
 add packaging later. Tests set `sys.path` automatically.

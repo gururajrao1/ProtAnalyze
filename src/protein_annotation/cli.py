@@ -32,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hmmer-db", default=None, help="Reference FASTA for phmmer search (omit to skip).")
     # Number of GO terms reported per protein.
     parser.add_argument("--top-k", type=int, default=3, help="Top GO terms per protein.")
+    # Trained GO head bundle (GOClassifier.save_weights stem or .json sidecar).
+    parser.add_argument("--go-weights", default=None, help="Trained GO head bundle path (omit for demo head).")
+    # Terms-only label-space JSON (alternative to --go-weights; ignored if both).
+    parser.add_argument("--go-terms", default=None, help="GO terms JSON label space (random-init head).")
+    # Opt-in 9-column TSV (+Disordered_Fraction, +Embedding_Source).
+    parser.add_argument("--extended-tsv", action="store_true", help="Write extended 9-column TSV.")
+    # Skip the offline disorder-fraction signal.
+    parser.add_argument("--no-disorder", action="store_true", help="Skip disorder-fraction computation.")
+    # CAFA eval: labels TSV (protein_id<TAB>GO:1,GO:2) + JSON report sidecar.
+    parser.add_argument("--eval-labels", default=None, help="Eval labels TSV for the CAFA report.")
+    parser.add_argument("--eval-report", default=None, help="CAFA eval report JSON path (needs --eval-labels).")
     return parser
 
 
@@ -46,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
             hmmer_db=args.hmmer_db,
             top_k=args.top_k,
             force_fallback_embeddings=args.no_esm,
+            go_weights=args.go_weights,
+            go_terms=args.go_terms,
+            extended_tsv=args.extended_tsv,
+            include_disorder=not args.no_disorder,
+            eval_labels=args.eval_labels,
+            eval_report=args.eval_report,
         )
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

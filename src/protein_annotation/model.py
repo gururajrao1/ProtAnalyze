@@ -157,6 +157,85 @@ class GOClassifier:
         self.thresholds = tune_thresholds(Y_val, val_proba)
         return self
 
+    def save_weights(self, path: str) -> str:
+        """Persist head weights + label space to disk for --go-weights reuse.
+
+        Writes two files sharing the stem of `path`: `<stem>.pt` (torch
+        state dict; skipped with a warning when torch is absent) and
+        `<stem>.json` (go_ids, thresholds, dims). Returns the JSON path.
+        """
+        import json
+        from pathlib import Path as _Path
+
+        stem: str = str(_Path(str(path)).with_suffix(""))
+        meta: dict = {
+            "go_ids": list(self.go_ids),
+            "thresholds": [float(t) for t in self.thresholds],
+            "input_dim": int(self.input_dim),
+            "hidden_dim": int(self.hidden_dim),
+            "dropout": float(self.dropout),
+        }
+        json_path: str = stem + ".json"
+        _Path(json_path).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        if self._model is not None:
+            import torch  # Local import: guarded by _model presence.
+
+            torch.save(self._model.state_dict(), stem + ".pt")  # type: ignore[union-attr]
+        else:
+            warnings.warn("No torch head to save; wrote thresholds/labels JSON only.")
+        return json_path
+
+    @classmethod
+    def load_weights(cls, path: str, input_dim: int | None = None) -> "GOClassifier":
+        """Load a classifier saved with save_weights() (or a terms JSON).
+
+        Args:
+            path: Either the `.json` sidecar or the shared stem path.
+            input_dim: Override the stored input width (e.g. ESM-2 650M
+                vectors are wider than the 8M default the head trained on).
+
+        Terms-only JSON (a bare list of GO ids, or {go_id: {name,...}})
+        is also accepted; the head keeps random-init weights in that case.
+        """
+        import json
+        from pathlib import Path as _Path
+
+        json_path = _Path(str(path))
+        if json_path.suffix != ".json":
+            json_path = _Path(str(json_path) + ".json")
+        meta = json.loads(json_path.read_text(encoding="utf-8"))
+        if isinstance(meta, list):
+            go_ids: list[str] = [str(g) for g in meta]
+            thresholds: list[float] = [0.5] * len(go_ids)
+            dims: dict = {}
+        elif isinstance(meta, dict) and "go_ids" not in meta:
+            # Assume {go_id: {name, namespace}} label-space dict.
+            go_ids = [str(g) for g in meta.keys()]
+            thresholds = [0.5] * len(go_ids)
+            dims = {}
+        else:
+            go_ids = [str(g) for g in meta.get("go_ids", GO_IDS)]
+            thresholds = [float(t) for t in meta.get("thresholds", [0.5] * len(go_ids))]
+            dims = meta
+        dim: int = int(input_dim) if input_dim is not None else int(dims.get("input_dim", 347))
+        clf = cls(
+            input_dim=dim,
+            go_ids=go_ids,
+            hidden_dim=int(dims.get("hidden_dim", 256)),
+            dropout=float(dims.get("dropout", 0.3)),
+            thresholds=thresholds,
+        )
+        pt_path = str(json_path.with_suffix(".pt"))
+        # Load torch weights only when the file exists and torch is present.
+        if clf._model is not None and _Path(pt_path).exists():
+            import torch  # Local import: guarded by _model presence.
+
+            state = torch.load(pt_path, map_location="cpu", weights_only=True)
+            clf._model.load_state_dict(state)  # type: ignore[union-attr]
+        elif not _Path(pt_path).exists():
+            warnings.warn(f"No .pt weights at {pt_path}; using random-init head.")
+        return clf
+
 
 def f1_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: float) -> float:
     """Binary F1 of one term's scores binarised at `threshold`."""
@@ -169,6 +248,135 @@ def f1_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: float) -
     precision: float = tp / (tp + fp)
     recall: float = tp / (tp + fn)
     return 2 * precision * recall / (precision + recall)
+
+
+def information_content(Y_true: np.ndarray) -> np.ndarray:
+    """Per-term information content from annotation frequencies.
+
+    IC(t) = -log2(P(t)) where P(t) is the fraction of proteins annotated
+    with term t (post-propagation frequencies in CAFA practice). Terms that
+    never occur get IC 0 (no information). Used by Smin.
+    """
+    n: int = max(int(Y_true.shape[0]), 1)
+    freq: np.ndarray = Y_true.sum(axis=0).astype(float) / n
+    with np.errstate(divide="ignore"):
+        ic: np.ndarray = -np.log2(np.clip(freq, 1e-12, 1.0))
+    ic[freq <= 0.0] = 0.0
+    return ic
+
+
+def _protein_centric_pr(
+    Y_true: np.ndarray, Y_score: np.ndarray, threshold: float
+) -> tuple[float, float]:
+    """Micro-averaged protein-centric precision/recall at one threshold.
+
+    Proteins with no predicted terms are skipped for precision; proteins
+    with no true terms are skipped for recall (CAFA convention).
+    """
+    pred: np.ndarray = (Y_score >= threshold).astype(int)
+    precisions: list[float] = []
+    recalls: list[float] = []
+    for i in range(Y_true.shape[0]):
+        n_pred: int = int(pred[i].sum())
+        n_true: int = int(Y_true[i].sum())
+        tp: int = int(((pred[i] == 1) & (Y_true[i] == 1)).sum())
+        if n_pred > 0:
+            precisions.append(tp / n_pred)
+        if n_true > 0:
+            recalls.append(tp / n_true)
+    precision: float = float(sum(precisions) / len(precisions)) if precisions else 0.0
+    recall: float = float(sum(recalls) / len(recalls)) if recalls else 0.0
+    return precision, recall
+
+
+def _semantic_distance(
+    Y_true: np.ndarray, Y_score: np.ndarray, threshold: float, ic: np.ndarray
+) -> float:
+    """S(t) = sqrt(remaining-uncertainty^2 + misinformation^2) at threshold."""
+    pred: np.ndarray = (Y_score >= threshold).astype(int)
+    # False negatives weighted by IC (missed information); false positives
+    # weighted by IC (wrongly added information); averaged over proteins.
+    fn_ic: float = float((((Y_true == 1) & (pred == 0)) * ic).sum(axis=1).mean())
+    fp_ic: float = float((((Y_true == 0) & (pred == 1)) * ic).sum(axis=1).mean())
+    return float(np.sqrt(fn_ic**2 + fp_ic**2))
+
+
+def _micro_aupr(Y_true: np.ndarray, Y_score: np.ndarray) -> float:
+    """Micro-averaged area under the precision-recall curve (trapezoid)."""
+    y: np.ndarray = Y_true.ravel().astype(int)
+    s: np.ndarray = Y_score.ravel().astype(float)
+    if y.sum() == 0 or y.sum() == y.size:
+        return 0.0  # Degenerate: no positives or no negatives.
+    order: np.ndarray = np.argsort(s)[::-1]
+    y_sorted: np.ndarray = y[order]
+    tp_cum: np.ndarray = np.cumsum(y_sorted).astype(float)
+    fp_cum: np.ndarray = np.cumsum(1 - y_sorted).astype(float)
+    precision: np.ndarray = tp_cum / np.clip(tp_cum + fp_cum, 1, None)
+    recall: np.ndarray = tp_cum / y.sum()
+    # Prepend (0, p0) anchor then integrate precision over recall.
+    recall = np.concatenate([[0.0], recall])
+    precision = np.concatenate([[precision[0]], precision])
+    trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    return float(trapz(precision, recall))
+
+
+def cafa_eval_report(
+    Y_true: np.ndarray,
+    Y_score: np.ndarray,
+    go_ids: list[str] | None = None,
+    grid: np.ndarray | None = None,
+) -> dict:
+    """CAFA-style evaluation report: per-term F1, Fmax, Smin, AUPR.
+
+    Args:
+        Y_true: Binary (n, n_terms) ground-truth labels.
+        Y_score: Predicted (n, n_terms) probabilities.
+        go_ids: Term ids for per-term rows (defaults to T0..Tn-1).
+        grid: Threshold candidates; defaults to 0.01..0.99 step 0.01.
+
+    Returns:
+        JSON-serialisable dict with per_term[{go_id, f1, threshold}],
+        fmax/fmax_threshold, smin/smin_threshold, aupr_micro and n_proteins.
+    """
+    if grid is None:
+        grid = np.arange(0.01, 1.0, 0.01)
+    n_terms: int = int(Y_true.shape[1])
+    ids: list[str] = list(go_ids) if go_ids else [f"T{i}" for i in range(n_terms)]
+    # Per-term best F1 over the grid (CAFA-evaluator-compatible term-centric view).
+    per_term: list[dict] = []
+    for j in range(n_terms):
+        best_f1: float = 0.0
+        best_t: float = 0.5
+        for t in grid:
+            f1: float = f1_at_threshold(Y_true[:, j], Y_score[:, j], float(t))
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = float(t)
+        per_term.append({"go_id": ids[j], "f1": round(best_f1, 4), "threshold": round(best_t, 3)})
+    # Protein-centric sweep for Fmax / Smin.
+    ic: np.ndarray = information_content(Y_true)
+    fmax: float = 0.0
+    fmax_t: float = 0.5
+    smin: float = float("inf")
+    smin_t: float = 0.5
+    for t in grid:
+        precision, recall = _protein_centric_pr(Y_true, Y_score, float(t))
+        f1: float = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        if f1 > fmax:
+            fmax, fmax_t = f1, float(t)
+        dist: float = _semantic_distance(Y_true, Y_score, float(t), ic)
+        if dist < smin:
+            smin, smin_t = dist, float(t)
+    return {
+        "n_proteins": int(Y_true.shape[0]),
+        "n_terms": n_terms,
+        "per_term": per_term,
+        "fmax": round(float(fmax), 4),
+        "fmax_threshold": round(float(fmax_t), 3),
+        "smin": round(float(smin), 4),
+        "smin_threshold": round(float(smin_t), 3),
+        "aupr_micro": round(float(_micro_aupr(Y_true, Y_score)), 4),
+    }
 
 
 def tune_thresholds(
