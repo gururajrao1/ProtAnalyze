@@ -33,9 +33,18 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from protein_annotation.amr import amr_available, hits_per_query, run_amrfinder
 from protein_annotation.embeddings import DEFAULT_ESM_MODEL, embed_sequences
+from protein_annotation.go_labels import parse_obo_ancestors
 from protein_annotation.hmmer import HmmerHit, hmmer_available, run_phmmer, top_hit_per_query
-from protein_annotation.model import GO_IDS, GO_TERMS, GOClassifier, cafa_eval_report
+from protein_annotation.model import (
+    GO_IDS,
+    GO_TERMS,
+    GOClassifier,
+    cafa_eval_report,
+    homolog_scores_from_hits,
+    parse_go_map,
+)
 from protein_annotation.pipeline import (
     TSV_COLUMNS,
     AnnotationRecord,
@@ -114,8 +123,18 @@ def annotate_fasta_text(
     force_fallback: bool = True,
     hmmer_db_text: str | None = None,
     eval_labels_text: str | None = None,
-) -> tuple[list[AnnotationRecord], list[dict], dict | None]:
-    """Annotate FASTA text, returning TSV records + rich detail + CAFA eval."""
+    go_map_text: str | None = None,
+    blend_alpha: float = 1.0,
+    obo_text: str | None = None,
+    run_amrfinder_flag: bool = False,
+) -> tuple[list[AnnotationRecord], list[dict], dict | None, dict]:
+    """Annotate FASTA text: TSV records + rich detail + CAFA eval + extras.
+
+    Extras carries blend/AMR provenance for the UI inspector (homolog map
+    size, OBO term count, AMR hit counts); empty features stay None/0.
+    """
+    if not 0.0 <= blend_alpha <= 1.0:
+        raise ValueError(f"blend_alpha must be in [0, 1], got {blend_alpha}")
     parsed = list(SeqIO.parse(io.StringIO(fasta_text), "fasta"))
     if not parsed:
         raise ValueError("No FASTA records found in input")
@@ -128,7 +147,8 @@ def annotate_fasta_text(
         force_fallback=force_fallback,
     )
     # Optional in-memory HMMER reference DB (temp files, graceful skip).
-    hmmer_best: dict[str, HmmerHit] = {}
+    # Full hit list is kept: top hits feed records, all hits feed blending.
+    all_hits: list[HmmerHit] = []
     if hmmer_db_text and hmmer_db_text.strip():
         if hmmer_available():
             with tempfile.TemporaryDirectory() as tmp:
@@ -136,11 +156,44 @@ def annotate_fasta_text(
                 db = Path(tmp) / "db.fasta"
                 q.write_text(fasta_text, encoding="utf-8")
                 db.write_text(hmmer_db_text, encoding="utf-8")
-                hmmer_best = top_hit_per_query(run_phmmer(q, db))
+                all_hits = run_phmmer(q, db)
         else:
             warnings.warn("phmmer binary not found; skipping HMMER step")
+    hmmer_best: dict[str, HmmerHit] = top_hit_per_query(all_hits)
     classifier = GOClassifier(input_dim=embedding.dim + len(features[0].to_vector()))
-    records = annotate_records(cleaned, features, embedding, hmmer_best, classifier, top_k)
+    # Optional homology blend inputs (pasted map + OBO text, else inactive).
+    homolog_go: dict[str, dict[str, float]] | None = None
+    map_targets: int = 0
+    if go_map_text and go_map_text.strip():
+        mapping = parse_go_map(go_map_text)
+        map_targets = len(mapping)
+        homolog_go = homolog_scores_from_hits(all_hits, mapping, classifier.go_ids)
+    obo_parents: dict[str, set[str]] | None = None
+    obo_terms: int = 0
+    if obo_text and obo_text.strip():
+        with tempfile.TemporaryDirectory() as tmp:
+            obo_path = Path(tmp) / "mini.obo"
+            obo_path.write_text(obo_text, encoding="utf-8")
+            obo_parents = parse_obo_ancestors(obo_path)
+        obo_terms = len(obo_parents)
+    # Optional AMRFinderPlus scan over the query (binary-gated, default DB).
+    amr_grouped: dict[str, list] = {}
+    if run_amrfinder_flag:
+        with tempfile.TemporaryDirectory() as tmp:
+            q = Path(tmp) / "q.fasta"
+            q.write_text(fasta_text, encoding="utf-8")
+            amr_grouped = hits_per_query(run_amrfinder(q))
+    records = annotate_records(
+        cleaned,
+        features,
+        embedding,
+        hmmer_best,
+        classifier,
+        top_k,
+        homolog_go=homolog_go,
+        blend_alpha=blend_alpha,
+        obo_parents=obo_parents,
+    )
 
     # Optional CAFA eval report over pasted labels TSV (protein_id<TAB>GO:1,GO:2).
     eval_report: dict | None = None
@@ -200,10 +253,37 @@ def annotate_fasta_text(
                 ),
                 "hmmer_hit": rec.hmmer_hit,
                 "vfdb": bool(hit and is_vfdb_hit(hit.target_id)),
+                "blended": rec.blended,
+                "amr": [
+                    {
+                        "gene": h.gene_symbol,
+                        "name": h.sequence_name,
+                        "element_type": h.element_type,
+                        "class": h.gene_class,
+                        "pct_identity": h.pct_identity,
+                        "pct_coverage": h.pct_coverage,
+                        "method": h.method,
+                    }
+                    for h in amr_grouped.get(seq.record_id, [])
+                ],
                 "predicted_function": rec.predicted_function,
             }
         )
-    return records, detail, eval_report
+    extras: dict = {
+        "blend": {
+            "alpha": blend_alpha,
+            "map_targets": map_targets,
+            "obo_terms": obo_terms,
+            "active": any(r.blended for r in records),
+        },
+        "amr": {
+            "requested": run_amrfinder_flag,
+            "available": amr_available(),
+            "hits": sum(len(v) for v in amr_grouped.values()),
+            "proteins_with_hits": len(amr_grouped),
+        },
+    }
+    return records, detail, eval_report, extras
 
 
 def records_to_tsv(records: list[AnnotationRecord]) -> str:
@@ -225,6 +305,7 @@ def health() -> dict:
         "esm_default": DEFAULT_ESM_MODEL,
         "go_terms": len(GO_IDS),
         "hmmer_available": hmmer_available(),
+        "amrfinder_available": amr_available(),
     }
 
 
@@ -234,6 +315,10 @@ async def annotate(
     fasta: str | None = Form(default=None),
     hmmer_db: str | None = Form(default=None),
     eval_labels: str | None = Form(default=None),
+    go_map: str | None = Form(default=None),
+    blend_alpha: float = Form(default=1.0),
+    obo: str | None = Form(default=None),
+    run_amrfinder: bool = Form(default=False),
     top_k: int = Form(default=3),
     no_esm: bool = Form(default=True),
     esm_model: str = Form(default=DEFAULT_ESM_MODEL),
@@ -250,13 +335,17 @@ async def annotate(
     top_k = max(1, min(int(top_k), len(GO_IDS)))
     started = time.perf_counter()
     try:
-        records, detail, eval_report = annotate_fasta_text(
+        records, detail, eval_report, extras = annotate_fasta_text(
             fasta_text,
             top_k=top_k,
             esm_model=esm_model,
             force_fallback=bool(no_esm),
             hmmer_db_text=hmmer_db,
             eval_labels_text=eval_labels,
+            go_map_text=go_map,
+            blend_alpha=float(blend_alpha),
+            obo_text=obo,
+            run_amrfinder_flag=bool(run_amrfinder),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -274,6 +363,8 @@ async def annotate(
         "go_weights": "demo random-init (untrained)",
         "top_k": top_k,
         "eval": eval_report,
+        "blend": extras["blend"],
+        "amr": extras["amr"],
         "elapsed_s": time.perf_counter() - started,
     }
     return JSONResponse(

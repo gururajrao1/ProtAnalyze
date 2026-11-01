@@ -9,9 +9,19 @@ from pathlib import Path
 import numpy as np
 from Bio import SeqIO
 
+from .amr import AmrHit, run_amrfinder
 from .embeddings import DEFAULT_ESM_MODEL, EmbeddingResult, embed_sequences
+from .go_labels import parse_obo_ancestors
 from .hmmer import HmmerHit, run_phmmer, top_hit_per_query
-from .model import GO_TERMS, GOClassifier, cafa_eval_report
+from .model import (
+    GO_TERMS,
+    GOClassifier,
+    blend_scores,
+    cafa_eval_report,
+    homolog_scores_from_hits,
+    parse_go_map,
+    smooth_over_ancestors,
+)
 from .sequence import (
     CleanedSequence,
     ProtParamFeatures,
@@ -50,6 +60,8 @@ class AnnotationRecord:
     # Optional offline signals (None/"" when skipped); excluded from default TSV.
     disordered_fraction: float | None = None
     embedding_source: str = ""
+    # True when Top_GO_Terms came from the homology-blended/smoothed scores.
+    blended: bool = False
 
     def to_row(self, extended: bool = False) -> list[str]:
         """Serialise to TSV_COLUMNS order (plus extended cols when asked)."""
@@ -90,8 +102,16 @@ def annotate_records(
     classifier: GOClassifier,
     top_k: int = 3,
     include_disorder: bool = True,
+    homolog_go: dict[str, dict[str, float]] | None = None,
+    blend_alpha: float = 1.0,
+    obo_parents: dict[str, set[str]] | None = None,
 ) -> list[AnnotationRecord]:
-    """Combine ProtParam + embeddings + GO head + HMMER into records."""
+    """Combine ProtParam + embeddings + GO head + HMMER into records.
+
+    Optional post-processing (all off by default, hence backward compatible):
+    homolog-arm blending (alpha < 1 with `homolog_go` votes) and GO-DAG
+    ancestor smoothing (`obo_parents`). Either sets record.blended = True.
+    """
     # Model input = ESM/hashed embedding concatenated with ProtParam vector.
     prot_vectors = np.array([f.to_vector() for f in features], dtype=np.float32)
     combined = np.concatenate([embedding.embeddings.astype(np.float32), prot_vectors], axis=1)
@@ -100,9 +120,25 @@ def annotate_records(
         classifier = GOClassifier(
             input_dim=combined.shape[1], go_ids=classifier.go_ids, thresholds=classifier.thresholds
         )
-    top_terms, top_scores = classifier.predict(combined, top_k=top_k)
+    proba: np.ndarray = classifier.predict_proba(combined)
+    go_ids: list[str] = classifier.go_ids
+    # Per-protein final scores: head -> optional blend -> optional smoothing.
+    blended_any: bool = bool(homolog_go) and blend_alpha < 1.0
+    smoothed_any: bool = obo_parents is not None
+    final_scores: list[np.ndarray] = []
+    for i, seq in enumerate(cleaned):
+        row: np.ndarray = np.asarray(proba[i], dtype=float)
+        if blended_any and homolog_go is not None and seq.record_id in homolog_go:
+            row = blend_scores(row, homolog_go[seq.record_id], go_ids, blend_alpha)
+        if smoothed_any and obo_parents is not None:
+            row = smooth_over_ancestors(row, go_ids, obo_parents)
+        final_scores.append(row)
     records: list[AnnotationRecord] = []
     for i, seq in enumerate(cleaned):
+        # Top-k from final scores (identical to classifier.predict by default).
+        idx: np.ndarray = np.argsort(final_scores[i])[::-1][:top_k]
+        terms: list[str] = [go_ids[j] for j in idx]
+        scores: list[float] = [float(final_scores[i][j]) for j in idx]
         hit: HmmerHit | None = hmmer_best.get(seq.record_id)
         hit_str: str = hit.short() if hit else "-"
         # Offline disorder signal (pure CPU); None when --no-disorder skips it.
@@ -112,12 +148,13 @@ def annotate_records(
                 protein_id=seq.record_id,
                 length=features[i].length,
                 molecular_weight=features[i].molecular_weight,
-                top_go_terms=top_terms[i],
-                confidence_scores=top_scores[i],
+                top_go_terms=terms,
+                confidence_scores=scores,
                 hmmer_hit=hit_str,
-                predicted_function=describe_function(top_terms[i], top_scores[i], hit_str),
+                predicted_function=describe_function(terms, scores, hit_str),
                 disordered_fraction=dis,
                 embedding_source=embedding.source,
+                blended=bool(blended_any or smoothed_any),
             )
         )
     return records
@@ -153,6 +190,24 @@ def load_eval_labels(path: str | Path, protein_ids: list[str], go_ids: list[str]
     return Y
 
 
+def write_amr_report(hits: list[AmrHit], path: str | Path) -> None:
+    """Write AMR hits as a small sidecar TSV (query, gene, class, id%, cov%)."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(
+            ["Protein_ID", "Gene_Symbol", "Sequence_Name", "Element_Type",
+             "Class", "Pct_Identity", "Pct_Coverage", "Method"]
+        )
+        for hit in hits:
+            writer.writerow(
+                [hit.query_id, hit.gene_symbol, hit.sequence_name, hit.element_type,
+                 hit.gene_class, f"{hit.pct_identity:.2f}", f"{hit.pct_coverage:.2f}",
+                 hit.method]
+            )
+
+
 def run_pipeline(
     input_fasta: str | Path,
     output_tsv: str | Path,
@@ -166,6 +221,12 @@ def run_pipeline(
     include_disorder: bool = True,
     eval_labels: str | Path | None = None,
     eval_report: str | Path | None = None,
+    go_map: str | Path | None = None,
+    blend_alpha: float = 1.0,
+    obo_path: str | Path | None = None,
+    run_amrfinder_flag: bool = False,
+    amrfinder_db: str | Path | None = None,
+    amr_report: str | Path | None = None,
 ) -> list[AnnotationRecord]:
     """Full pipeline: parse -> clean -> ProtParam -> embed -> GO -> HMMER -> TSV.
 
@@ -182,6 +243,12 @@ def run_pipeline(
         include_disorder: Compute the offline disorder signal (False = skip).
         eval_labels: Labels TSV for the CAFA eval report (None = no eval).
         eval_report: JSON sidecar path for the CAFA report (needs eval_labels).
+        go_map: Target->GO map TSV enabling homology blending (needs hmmer_db).
+        blend_alpha: Head weight in [0, 1]; 1.0 = head only (default).
+        obo_path: go-basic.obo for GO-DAG ancestor smoothing (None = off).
+        run_amrfinder_flag: Run the AMRFinderPlus AMR scan (graceful skip).
+        amrfinder_db: AMRFinderPlus database dir (None = installed default).
+        amr_report: Sidecar TSV path for AMR hits (needs run_amrfinder_flag).
 
     Returns:
         Annotation records (also written to output_tsv).
@@ -189,6 +256,8 @@ def run_pipeline(
     import json as _json
     import warnings as _warnings
 
+    if not 0.0 <= blend_alpha <= 1.0:
+        raise ValueError(f"blend_alpha must be in [0, 1], got {blend_alpha}")
     # 1. Parse + clean/mask every record.
     parsed = list(SeqIO.parse(str(input_fasta), "fasta"))
     if not parsed:
@@ -205,9 +274,11 @@ def run_pipeline(
     )
     fused_dim: int = embedding.dim + len(features[0].to_vector())
     # 4. Optional phmmer homology search (graceful skip when unavailable).
-    hmmer_best: dict[str, HmmerHit] = {}
+    # Keep the full hit list: top hits feed the TSV, all hits feed blending.
+    all_hits: list[HmmerHit] = []
     if hmmer_db is not None:
-        hmmer_best = top_hit_per_query(run_phmmer(input_fasta, hmmer_db))
+        all_hits = run_phmmer(input_fasta, hmmer_db)
+    hmmer_best: dict[str, HmmerHit] = top_hit_per_query(all_hits)
     # 5. GO multilabel head inference (random-init demo weights by default).
     classifier: GOClassifier
     if go_weights is not None:
@@ -217,9 +288,42 @@ def run_pipeline(
         classifier = GOClassifier.load_weights(str(go_terms), input_dim=fused_dim)
     else:
         classifier = GOClassifier(input_dim=fused_dim)
+    # 5b. Optional homology blend inputs (warn-and-skip on missing files).
+    homolog_go: dict[str, dict[str, float]] | None = None
+    if go_map is not None:
+        try:
+            mapping = parse_go_map(Path(go_map).read_text(encoding="utf-8"))
+            homolog_go = homolog_scores_from_hits(all_hits, mapping, classifier.go_ids)
+        except OSError as exc:
+            _warnings.warn(f"Cannot read --go-map ({exc}); blending disabled.")
+    obo_parents: dict[str, set[str]] | None = None
+    if obo_path is not None:
+        try:
+            obo_parents = parse_obo_ancestors(obo_path)
+        except OSError as exc:
+            _warnings.warn(f"Cannot read --obo ({exc}); DAG smoothing disabled.")
+    # 5c. Optional AMRFinderPlus scan (binary-gated inside run_amrfinder).
+    amr_hits: list[AmrHit] = []
+    if run_amrfinder_flag:
+        amr_hits = run_amrfinder(input_fasta, amrfinder_db)
     records: list[AnnotationRecord] = annotate_records(
-        cleaned, features, embedding, hmmer_best, classifier, top_k, include_disorder
+        cleaned,
+        features,
+        embedding,
+        hmmer_best,
+        classifier,
+        top_k,
+        include_disorder,
+        homolog_go=homolog_go,
+        blend_alpha=blend_alpha,
+        obo_parents=obo_parents,
     )
+    # 5d. Optional AMR sidecar (warn-and-skip without the scan flag).
+    if amr_report is not None:
+        if not run_amrfinder_flag:
+            _warnings.warn("--amr-report needs --run-amrfinder; skipping AMR report.")
+        else:
+            write_amr_report(amr_hits, amr_report)
     # 6. Optional CAFA eval sidecar (needs labels; else warn-and-skip).
     if eval_report is not None:
         if eval_labels is None:

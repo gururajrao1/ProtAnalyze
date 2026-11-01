@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:  # Annotation-only; avoids any import-cycle risk.
+    from .hmmer import HmmerHit
 
 # Curated demo GO label space spanning BP / MF / CC.
 GO_TERMS: dict[str, dict[str, str]] = {
@@ -405,3 +409,105 @@ def tune_thresholds(
                 best_t = float(t)
         tuned.append(best_t)
     return tuned
+
+
+def parse_go_map(text: str) -> dict[str, set[str]]:
+    """Parse a target->GO map TSV (`target_id <TAB> GO:1,GO:2`) for blending.
+
+    Skips blank lines and '#' comments; malformed lines are ignored with a
+    warning so a hand-edited map never crashes a run.
+    """
+    mapping: dict[str, set[str]] = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts: list[str] = line.rstrip("\n").split("\t")
+        if len(parts) < 2 or not parts[0].strip():
+            warnings.warn(f"Ignoring malformed go-map line {lineno}.")
+            continue
+        terms: set[str] = {t.strip() for t in parts[1].split(",") if t.strip()}
+        if terms:
+            mapping.setdefault(parts[0].strip(), set()).update(terms)
+    return mapping
+
+
+def homolog_scores_from_hits(
+    hits: list["HmmerHit"], go_map: dict[str, set[str]], go_ids: list[str]
+) -> dict[str, dict[str, float]]:
+    """Transfer GO terms from HMMER hits, weighted by normalised bitscore.
+
+    DiamondScore-portable idea: each mapped hit votes for its target's GO
+    terms with weight bitscore/max_bitscore (per query, so the best hit
+    votes 1.0); a term's score is the max vote across hits. Terms outside
+    `go_ids` and unmapped targets are ignored. Returns {query: {term: score}}.
+    """
+    want: set[str] = set(go_ids)
+    by_query: dict[str, list["HmmerHit"]] = {}
+    for hit in hits:
+        by_query.setdefault(hit.query_id, []).append(hit)
+    scores: dict[str, dict[str, float]] = {}
+    for query, qhits in by_query.items():
+        mapped: list["HmmerHit"] = [h for h in qhits if h.target_id in go_map]
+        if not mapped:
+            continue  # No mappable hits; homolog arm abstains for this query.
+        best: float = max(h.bitscore for h in mapped)
+        if best <= 0:
+            continue  # Degenerate scores; abstain rather than divide by zero.
+        term_scores: dict[str, float] = {}
+        for hit in mapped:
+            weight: float = hit.bitscore / best
+            for term in go_map[hit.target_id]:
+                if term in want and weight > term_scores.get(term, 0.0):
+                    term_scores[term] = weight
+        if term_scores:
+            scores[query] = term_scores
+    return scores
+
+
+def blend_scores(
+    head: np.ndarray, homolog: dict[str, float], go_ids: list[str], alpha: float
+) -> np.ndarray:
+    """Convex blend of head sigmoids with homolog votes for one protein.
+
+    blended[j] = alpha * head[j] + (1 - alpha) * homolog(term_j),
+    with absent homolog terms treated as 0. alpha=1.0 reproduces the head.
+    """
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"blend alpha must be in [0, 1], got {alpha}")
+    homolog_vec: np.ndarray = np.array(
+        [homolog.get(term, 0.0) for term in go_ids], dtype=float
+    )
+    return alpha * np.asarray(head, dtype=float) + (1.0 - alpha) * homolog_vec
+
+
+def smooth_over_ancestors(
+    scores: np.ndarray, go_ids: list[str], parents: dict[str, set[str]]
+) -> np.ndarray:
+    """Enforce true-path consistency: no ancestor scores below its descendants.
+
+    smoothed(t) = max(score(t), max over children of smoothed(child)),
+    computed leaves-first via memoised DFS over the child map derived from
+    `parents`. Terms outside the map pass through unchanged.
+    """
+    children: dict[str, set[str]] = {}
+    for child, pars in parents.items():
+        for par in pars:
+            children.setdefault(par, set()).add(child)
+    base: dict[str, float] = {term: float(scores[j]) for j, term in enumerate(go_ids)}
+    memo: dict[str, float] = {}
+
+    def _smooth(term: str) -> float:
+        if term in memo:
+            return memo[term]
+        memo[term] = base.get(term, 0.0)  # Pre-seed: cycle-safe.
+        best: float = memo[term]
+        for child in children.get(term, ()):
+            child_score: float = _smooth(child)
+            if child_score > best:
+                best = child_score
+        memo[term] = best
+        return best
+
+    for term in go_ids:
+        _smooth(term)
+    return np.array([memo.get(term, float(scores[j])) for j, term in enumerate(go_ids)])

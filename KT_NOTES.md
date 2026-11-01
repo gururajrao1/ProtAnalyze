@@ -87,6 +87,34 @@ python -c "from fastapi.testclient import TestClient; from server import app; c 
   unmaintained stacks or wrong label space; operon needs genome/GFF mode
   (single-protein input has no coordinates).
 
+## Batch 2 — AMR scan + homology blend (autonomous follow-up)
+
+Shipped two more shortlist items without changing the default TSV contract:
+
+| Signal | Implementation | Why |
+|---|---|---|
+| AMRFinderPlus AMR scan | `src/protein_annotation/amr.py` (`amr_available`, header-driven `parse_amr_tsv`, `run_amrfinder` with graceful skip, `hits_per_query`); CLI `--run-amrfinder/--amrfinder-db/--amr-report`; `/annotate` `run_amrfinder` field; per-record `amr` hits + Homology-panel table + provenance | Best offline AMR fit license-wise (NCBI public domain); protein-input mode matches our FASTA |
+| Homology blend + DAG smoothing | `model.parse_go_map/homolog_scores_from_hits/blend_scores/smooth_over_ancestors`; CLI `--go-map/--blend-alpha/--obo`; `/annotate` `go_map/blend_alpha/obo` fields; `record.blended` flag + badges + provenance | DiamondScore-portable idea: bitscore-weighted GO transfer blended with head sigmoids, then true-path ancestor smoothing |
+
+Staph-specific fetch script was evaluated and **skipped**: the curated
+`macgenomegue/Staphylococcus_VFs` DB is nucleotide, not protein, so it cannot
+feed the `phmmer` protein path; VFDB protein already covers S. aureus.
+
+```powershell
+# Batch-2 tests (11 new; 31 total with batch 1)
+python -m pytest tests/test_batch2.py -q
+
+# Blend + smoothing offline (homolog arm abstains without phmmer hits)
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --go-map map.tsv --blend-alpha 0.5 --obo go-basic.obo
+
+# AMR scan (warns + header-only sidecar when the Linux-only binary is absent)
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --run-amrfinder --amr-report amr.tsv
+```
+
+Caveat carried forward: the blend is a mechanism, not yet a quality gain —
+it needs the trained head (batch-1 builder) plus calibrated scores before the
+homolog arm helps; with demo weights use `--blend-alpha 1.0` (default).
+
 ## Known limitations
 
 - **Demo weights**: the GO head ships randomly initialised; scores are

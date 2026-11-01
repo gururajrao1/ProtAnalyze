@@ -49,7 +49,7 @@ async function checkHealth() {
     const r = await fetch("/health");
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const h = await r.json();
-    pill.textContent = `Backend OK · ${h.go_terms} GO terms · HMMER ${h.hmmer_available ? "available" : "unavailable"}`;
+    pill.textContent = `Backend OK · ${h.go_terms} GO terms · HMMER ${h.hmmer_available ? "on" : "off"} · AMR ${h.amrfinder_available ? "on" : "off"}`;
     pill.classList.add("ok");
   } catch {
     pill.textContent = "Backend unreachable";
@@ -90,6 +90,10 @@ async function runAnnotate() {
     fd.append("esm_model", mode === "hashed" ? "esm2_t6_8M_UR50D" : mode);
     fd.append("hmmer_db", $("hmmer-db").value);
     fd.append("eval_labels", $("eval-labels").value);
+    fd.append("go_map", $("go-map").value);
+    fd.append("blend_alpha", $("blend-alpha").value);
+    fd.append("obo", $("obo-text").value);
+    fd.append("run_amrfinder", $("run-amrfinder").checked ? "true" : "false");
     const r = await fetch("/annotate", { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -183,7 +187,9 @@ function renderDetail(rec) {
     (rec.n_masked ? `<span class="tag">${rec.n_masked} masked</span>` : "") +
     (embLabel ? `<span class="tag">${esc(embLabel)}</span>` : "") +
     disBadge +
-    (rec.vfdb ? `<span class="tag vfdb">VFDB virulence hit</span>` : "");
+    (rec.vfdb ? `<span class="tag vfdb">VFDB virulence hit</span>` : "") +
+    (rec.blended ? `<span class="tag">blended scores</span>` : "") +
+    (rec.amr && rec.amr.length ? `<span class="tag warn">${rec.amr.length} AMR hit${rec.amr.length === 1 ? "" : "s"}</span>` : "");
   $("prot-func").textContent = rec.predicted_function;
   renderGoTable(rec);
   renderProps(rec);
@@ -249,6 +255,16 @@ function renderHmmer(rec) {
       `supplied or the <code>phmmer</code> binary is unavailable. Predictions rest on ` +
       `sequence features alone.</p>`;
   }
+  // AMR hits from the optional AMRFinderPlus scan (per-protein list).
+  if (rec.amr && rec.amr.length) {
+    body.innerHTML += `<h3>AMRFinderPlus hits (${rec.amr.length})</h3>` +
+      `<table class="data"><thead><tr><th scope="col">Gene</th><th scope="col">Class</th>` +
+      `<th scope="col" class="num">Id%</th></tr></thead><tbody>` +
+      rec.amr.map((a) =>
+        `<tr><td>${esc(a.gene)} <span class="muted small">${esc(a.element_type)}</span></td>` +
+        `<td>${esc(a.class || "-")}</td><td class="num">${Number(a.pct_identity).toFixed(1)}</td></tr>`
+      ).join("") + `</tbody></table>`;
+  }
 }
 
 function renderProvenance() {
@@ -268,6 +284,8 @@ function renderProvenance() {
     ["Top-K", String(m.top_k)],
     ["Thresholds", "default 0.5 (demo weights, untuned)"],
     ["CAFA eval", m.eval ? `Fmax ${m.eval.fmax} · Smin ${m.eval.smin} · AUPR ${m.eval.aupr_micro}` : "no labels supplied"],
+    ["Homology blend", m.blend ? (m.blend.active ? `active (α=${m.blend.alpha}, map ${m.blend.map_targets}, OBO ${m.blend.obo_terms})` : `off (α=${m.blend.alpha})`) : "off"],
+    ["AMR scan", m.amr ? (m.amr.requested ? (m.amr.available ? `${m.amr.hits} hits / ${m.amr.proteins_with_hits} proteins` : "requested, binary unavailable (skipped)") : "not requested") : "not requested"],
     ["Server time", `${m.elapsed_s.toFixed(2)}s`],
   ];
   dl.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");

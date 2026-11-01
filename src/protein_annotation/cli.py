@@ -43,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
     # CAFA eval: labels TSV (protein_id<TAB>GO:1,GO:2) + JSON report sidecar.
     parser.add_argument("--eval-labels", default=None, help="Eval labels TSV for the CAFA report.")
     parser.add_argument("--eval-report", default=None, help="CAFA eval report JSON path (needs --eval-labels).")
+    # Homology blend: target->GO map + head weight + OBO DAG smoothing.
+    parser.add_argument("--go-map", default=None, help="Target->GO map TSV for homology blending.")
+    parser.add_argument("--blend-alpha", type=float, default=1.0, help="Head weight in [0,1]; 1.0 = head only.")
+    parser.add_argument("--obo", default=None, dest="obo_path", help="go-basic.obo for DAG smoothing.")
+    # AMRFinderPlus scan (Linux/macOS binary; graceful skip elsewhere).
+    parser.add_argument("--run-amrfinder", action="store_true", help="Run the AMRFinderPlus AMR scan.")
+    parser.add_argument("--amrfinder-db", default=None, help="AMRFinderPlus database dir (default install).")
+    parser.add_argument("--amr-report", default=None, help="AMR hits sidecar TSV (needs --run-amrfinder).")
     return parser
 
 
@@ -63,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
             include_disorder=not args.no_disorder,
             eval_labels=args.eval_labels,
             eval_report=args.eval_report,
+            go_map=args.go_map,
+            blend_alpha=args.blend_alpha,
+            obo_path=args.obo_path,
+            run_amrfinder_flag=args.run_amrfinder,
+            amrfinder_db=args.amrfinder_db,
+            amr_report=args.amr_report,
         )
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

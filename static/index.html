@@ -63,6 +63,19 @@
         <summary>CAFA eval labels (optional)</summary>
         <textarea id="eval-labels" rows="3" spellcheck="false" placeholder="protein_id&#9;GO:0003824,GO:0005524&#10;one line per protein"></textarea>
       </details>
+      <details class="field">
+        <summary>Homology blend + AMR (optional)</summary>
+        <textarea id="go-map" rows="2" spellcheck="false" placeholder="target_id&#9;GO:0003824,GO:0005524&#10;maps HMMER targets to GO terms"></textarea>
+        <div class="field-row">
+          <label class="field">Blend &alpha;
+            <input type="number" id="blend-alpha" value="1.0" min="0" max="1" step="0.1">
+          </label>
+          <label class="field">AMR scan
+            <span class="small"><input type="checkbox" id="run-amrfinder"> AMRFinderPlus</span>
+          </label>
+        </div>
+        <textarea id="obo-text" rows="2" spellcheck="false" placeholder="Paste go-basic.obo subset&#10;for DAG smoothing (optional)"></textarea>
+      </details>
       <div class="btn-row">
         <button id="annotate-btn" class="btn primary">Annotate</button>
         <button id="demo-btn" class="btn ghost" type="button">Load demo</button>
@@ -160,7 +173,7 @@
   <!-- Right: inspector with evidence and run provenance. -->
   <aside class="inspector" aria-label="Evidence inspector">
     <section class="panel">
-      <h2>Homology (HMMER)</h2>
+      <h2>Homology + AMR</h2>
       <div id="hmmer-body"><p class="muted">No run yet.</p></div>
     </section>
     <section class="panel">

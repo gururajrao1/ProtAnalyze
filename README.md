@@ -49,20 +49,24 @@ run-provenance inspector (right), export menu (TSV/JSON/FASTA), and a
 status bar. No Streamlit.
 
 Per-protein badges surface the embedding source (`hashed`/`ESM-2`),
-disordered fraction (flagged at ≥50%), and VFDB virulence hits; the
-inspector shows the HMMER DB kind, GO-weights provenance, and an
-optional CAFA report (Fmax/Smin/AUPR + per-term F1).
+disordered fraction (flagged at ≥50%), VFDB virulence hits, blended
+scores, and AMR hit counts; the inspector shows the HMMER DB kind,
+GO-weights provenance, an optional CAFA report (Fmax/Smin/AUPR +
+per-term F1), AMRFinderPlus hits, and blend/AMR provenance.
 
 API:
 
-- `GET /health` — liveness + capability flags
+- `GET /health` — liveness + capability flags (incl. `amrfinder_available`)
 - `POST /annotate` — multipart `file` (FASTA) or `fasta` text field,
   plus `top_k`, `no_esm`, `esm_model`, `hmmer_db` (reference FASTA text),
-  `eval_labels` (labels TSV text: `protein_id<TAB>GO:1,GO:2`);
+  `eval_labels` (labels TSV text: `protein_id<TAB>GO:1,GO:2`),
+  `go_map` (target→GO TSV text), `blend_alpha`, `obo` (OBO text),
+  `run_amrfinder`;
   returns `{records: [...], tsv: "...", columns: [...], meta: {...}}`
   where each record carries `disorder`, `disordered_fraction`,
-  `embedding_source`, `vfdb`, and `meta` carries `hmmer_db_kind`,
-  `vfdb_hits`, `go_weights`, and `eval` (null without labels)
+  `embedding_source`, `vfdb`, `blended`, `amr`, and `meta` carries
+  `hmmer_db_kind`, `vfdb_hits`, `go_weights`, `eval` (null without
+  labels), `blend`, and `amr`
 
 ## CLI usage
 
@@ -83,6 +87,13 @@ python -m protein_annotation hypothetical_proteins.fasta --no-esm --no-disorder
 # Trained GO head + CAFA eval sidecar
 python -m protein_annotation hypothetical_proteins.fasta --no-esm --go-weights data/head \
     --eval-labels labels.tsv --eval-report eval.json
+
+# Homology blend (bitscore-weighted GO transfer + DAG smoothing)
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --hmmer-db reference.fasta \
+    --go-map target_go.tsv --blend-alpha 0.5 --obo go-basic.obo
+
+# AMRFinderPlus scan (Linux/macOS; warns + skips elsewhere)
+python -m protein_annotation hypothetical_proteins.fasta --no-esm --run-amrfinder --amr-report amr.tsv
 ```
 
 ## Virulence tier (VFDB)
@@ -121,14 +132,19 @@ add packaging later. Tests set `sys.path` automatically.
 
 ```text
 src/protein_annotation/
-  sequence.py    cleaning/masking + ProtParam features
+  sequence.py    cleaning/masking + ProtParam features + disorder
   embeddings.py  ESM-2 + hashed fallback
   hmmer.py       phmmer wrapper + tblout parser
-  model.py       GO multilabel head + threshold tuning
-  pipeline.py    orchestration + TSV writer
+  amr.py         AMRFinderPlus wrapper + tabular parser
+  go_labels.py   GAF/OBO label build (true-path + prune)
+  model.py       GO head + tuning + CAFA eval + homology blend
+  pipeline.py    orchestration + TSV/AMR writers
   cli.py         argparse entry point
-hypothetical_proteins.fasta   6 synthetic bacterial sequences (one with X/B/Z/U/O)
-tests/test_pipeline.py        smoke tests
+server.py + static/          FastAPI workbench (Benchling/Geneious-style UI)
+scripts/                     fetch_vfdb, build_go_labels helpers
+hypothetical_proteins.fasta  6 synthetic bacterial sequences (one with X/B/Z/U/O)
+tests/                       pipeline + shortlist + batch-2 suites
+KT_NOTES.md                  knowledge-transfer handoff
 ```
 
 ## Notes
