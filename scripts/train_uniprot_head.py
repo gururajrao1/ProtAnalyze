@@ -59,12 +59,16 @@ def fetch_url(url: str, timeout: int = 120, tries: int = 4) -> tuple[bytes, str]
 
 
 def next_link(link_header: str) -> str | None:
-    """Extract the rel=next URL from a REST pagination Link header."""
-    for part in link_header.split(","):
-        if 'rel="next"' in part:
-            url = part.split(";")[0].strip().strip("<>")
-            return url or None
-    return None
+    """Extract the rel=next URL from a REST pagination Link header.
+
+    Parsed with a regex (never split on commas: the URL itself contains
+    comma-separated fields=...) and resolved against REST_BASE since
+    UniProt returns a relative next link.
+    """
+    match = re.search(r'<([^>]+)>\s*;\s*rel="next"', link_header)
+    if not match:
+        return None
+    return urllib.parse.urljoin(REST_BASE + "?x=1", match.group(1))
 
 
 def fetch_proteins(out_tsv: Path, max_proteins: int, page_size: int) -> int:
