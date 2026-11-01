@@ -95,6 +95,21 @@ def hmmer_db_kind(hmmer_db_text: str | None) -> str:
 app = FastAPI(title="Protein Annotation Workbench", version="0.2.0")
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
+# Optional trained head (scripts/train_uniprot_head.py output). Hashed-path
+# only: ESM vectors share the width but not the feature semantics.
+TRAINED_HEAD = ROOT / "data" / "head_demo12.json"
+
+
+def load_head_or_demo(input_dim: int, allow_trained: bool) -> tuple[GOClassifier, str]:
+    """Trained head when its bundle exists and fits, else demo (never raises)."""
+    if allow_trained and TRAINED_HEAD.exists():
+        try:
+            head = GOClassifier.load_weights(str(TRAINED_HEAD), input_dim=input_dim)
+            return head, "trained (UniProt bacterial v1)"
+        except Exception as exc:  # Shape mismatch, corrupt file, no torch, ...
+            warnings.warn(f"Trained head unusable ({exc}); using demo head.")
+    return GOClassifier(input_dim=input_dim), "demo random-init (untrained)"
+
 
 def smooth(values: list[float], window: int = 5) -> list[float]:
     """Centered moving average (edge-shrunk) for track smoothing."""
@@ -160,7 +175,9 @@ def annotate_fasta_text(
         else:
             warnings.warn("phmmer binary not found; skipping HMMER step")
     hmmer_best: dict[str, HmmerHit] = top_hit_per_query(all_hits)
-    classifier = GOClassifier(input_dim=embedding.dim + len(features[0].to_vector()))
+    classifier, weights_label = load_head_or_demo(
+        embedding.dim + len(features[0].to_vector()), allow_trained=force_fallback
+    )
     # Optional homology blend inputs (pasted map + OBO text, else inactive).
     homolog_go: dict[str, dict[str, float]] | None = None
     map_targets: int = 0
@@ -270,6 +287,8 @@ def annotate_fasta_text(
             }
         )
     extras: dict = {
+        "go_weights": weights_label,
+        "go_count": len(classifier.go_ids),
         "blend": {
             "alpha": blend_alpha,
             "map_targets": map_targets,
@@ -359,8 +378,8 @@ async def annotate(
         "hmmer_db_kind": hmmer_db_kind(hmmer_db),
         "hmmer_hits": sum(1 for r in records if r.hmmer_hit != "-"),
         "vfdb_hits": sum(1 for d in detail if d["vfdb"]),
-        "go_terms": len(GO_IDS),
-        "go_weights": "demo random-init (untrained)",
+        "go_terms": extras["go_count"],
+        "go_weights": extras["go_weights"],
         "top_k": top_k,
         "eval": eval_report,
         "blend": extras["blend"],

@@ -162,8 +162,10 @@ notebook remains for teaching and quick single-protein checks.
 
 ## Notes
 
-- GO head ships with **randomly initialised demo weights**; call
-  `GOClassifier.fit(X_train, Y_train, X_val, Y_val)` to train on labelled
-  data, which also tunes per-term thresholds.
+- GO head ships with **randomly initialised demo weights**; train real
+  ones with `python scripts/train_uniprot_head.py` (≈3k reviewed bacterial
+  proteins, Fmax 0.74 on held-out test), then reuse via
+  `--go-weights data/head_demo12` (CLI) — the workbench auto-loads
+  `data/head_demo12.json` on the hashed path when present.
 - `fair-esm` downloads weights from the internet on first use; without
   network access the pipeline warns and continues with hashed embeddings.

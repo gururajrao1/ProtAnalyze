@@ -290,6 +290,10 @@ function renderProvenance() {
   ];
   dl.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
   $("run-meta").textContent = `${m.embeddings} · ${m.esm_model}`;
+  // About panel reflects whether scores came from trained or demo weights.
+  $("about-text").textContent = (m.go_weights && m.go_weights.startsWith("trained"))
+    ? `GO confidences come from a multilabel head (${m.go_weights}) over fused sequence and ProtParam features, evaluated at Fmax 0.74 on a held-out bacterial split. Confirm hits against HMMER homology and the literature before reporting a function.`
+    : "GO confidences come from a multilabel head over fused ESM-2 and ProtParam features. This run used demonstration weights: treat scores as ranking signals and confirm hits against HMMER homology and the literature before reporting a function.";
   renderEval(m.eval);
 }
 

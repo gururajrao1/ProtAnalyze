@@ -115,6 +115,20 @@ Caveat carried forward: the blend is a mechanism, not yet a quality gain —
 it needs the trained head (batch-1 builder) plus calibrated scores before the
 homolog arm helps; with demo weights use `--blend-alpha 1.0` (default).
 
+## Training run — UniProt bacterial head v1 (autonomous)
+
+`scripts/train_uniprot_head.py` paged 3,000 reviewed bacterial proteins
+(UniProt REST, `reviewed:true + taxonomy_id:2`), propagated GO terms via
+`go-basic.obo`, kept 2,788 hitting the demo-12 space, trained 80/10/10
+(hashed embeddings, 30 epochs, CPU): **test Fmax 0.743, Smin 1.844,
+micro-AUPR 0.733 (n=279)**. Weights at `data/head_demo12.{pt,json}`
+(gitignored) + `data/train_report.json`. Two terms had zero positives in
+this sample (`GO:0004871` signal transducer, `GO:0016021` membrane) —
+expected to stay weak until the GAF-scale build. CLI: `--go-weights
+data/head_demo12`; the workbench auto-loads the bundle on the hashed
+path only (ESM vectors share the width, not the semantics) and the
+About panel + provenance report which head scored each run.
+
 ## Known limitations
 
 - **Demo weights**: the GO head ships randomly initialised; scores are
