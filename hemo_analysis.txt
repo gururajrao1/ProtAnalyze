@@ -1,0 +1,30 @@
+Protein Sequence: MVLSPADKTNVKAAWGKVGAHAGEYGAEAL... [142 aa]
+
+Protein Properties:
+- Molecular Weight: 15257.36 Da
+- Isoelectric Point (pI): 8.72
+- Aromaticity: 0.0775
+- Instability Index: 6.97
+- GRAVY: 0.05
+
+Amino Acid Composition:
+  A: 14.79%
+  C: 0.70%
+  D: 5.63%
+  E: 2.82%
+  F: 4.93%
+  G: 4.93%
+  H: 7.04%
+  I: 0.00%
+  K: 7.75%
+  L: 12.68%
+  M: 2.11%
+  N: 2.82%
+  P: 4.93%
+  Q: 0.70%
+  R: 2.11%
+  S: 7.75%
+  T: 6.34%
+  V: 9.15%
+  W: 0.70%
+  Y: 2.11%

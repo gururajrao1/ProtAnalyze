@@ -1,6 +1,8 @@
 # Protein Annotation Pipeline
 
-End-to-end CLI pipeline that annotates **hypothetical proteins** from FASTA:
+End-to-end CLI pipeline that annotates **hypothetical proteins** from FASTA.
+It unifies the original ProtAnalyze notebook (preserved below) with a
+production pipeline and web workbench.
 
 1. **Parse + clean** — Biopython `SeqIO`; ambiguous residues (`X/B/Z/U/O`)
    are substituted (`X→A, B→N, Z→Q, U→C, O→K`) and tracked with a
@@ -145,7 +147,18 @@ scripts/                     fetch_vfdb, build_go_labels helpers
 hypothetical_proteins.fasta  6 synthetic bacterial sequences (one with X/B/Z/U/O)
 tests/                       pipeline + shortlist + batch-2 suites
 KT_NOTES.md                  knowledge-transfer handoff
+analyze.ipynb + hemo.*       legacy ProtAnalyze notebook (below)
 ```
+
+## Legacy ProtAnalyze notebook
+
+The original ProtAnalyze tool is preserved in this repo: put a protein
+sequence in a FASTA file (e.g. `hemo.fasta`), run `analyze.ipynb`, and
+read `hemo_analysis.txt` + `amino_acid_composition.png` (MW, pI,
+aromaticity, instability, GRAVY, AA composition). Its reusable logic —
+ProtParam analysis, the AA-composition chart, and the batch SeqIO loop —
+is ported into `src/protein_annotation/` and the workbench above; the
+notebook remains for teaching and quick single-protein checks.
 
 ## Notes
 

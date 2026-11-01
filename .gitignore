@@ -26,6 +26,13 @@ protein_annotations.tsv
 *.pt
 *.pth
 
+# Downloaded data (VFDB, GOA, OBO, label NPZs, trained weights)
+data/
+*.npz
+
+# Jupyter (legacy ProtAnalyze notebook)
+.ipynb_checkpoints/
+
 # Editors / OS
 .vscode/
 .idea/
