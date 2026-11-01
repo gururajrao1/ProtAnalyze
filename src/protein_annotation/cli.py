@@ -36,10 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--go-weights", default=None, help="Trained GO head bundle path (omit for demo head).")
     # Terms-only label-space JSON (alternative to --go-weights; ignored if both).
     parser.add_argument("--go-terms", default=None, help="GO terms JSON label space (random-init head).")
-    # Opt-in 9-column TSV (+Disordered_Fraction, +Embedding_Source).
-    parser.add_argument("--extended-tsv", action="store_true", help="Write extended 9-column TSV.")
+    # Opt-in 11-column TSV (+Disordered_Fraction, +Embedding_Source, +SS fractions).
+    parser.add_argument("--extended-tsv", action="store_true", help="Write extended 11-column TSV.")
     # Skip the offline disorder-fraction signal.
     parser.add_argument("--no-disorder", action="store_true", help="Skip disorder-fraction computation.")
+    # SS3 secondary-structure head (default data/ss_head_8m.json) or skip flag.
+    parser.add_argument("--ss-head", default=None, help="SS3 head bundle path (omit for the default).")
+    parser.add_argument("--no-ss", action="store_true", help="Skip SS3 helix/sheet computation.")
     # CAFA eval: labels TSV (protein_id<TAB>GO:1,GO:2) + JSON report sidecar.
     parser.add_argument("--eval-labels", default=None, help="Eval labels TSV for the CAFA report.")
     parser.add_argument("--eval-report", default=None, help="CAFA eval report JSON path (needs --eval-labels).")
@@ -77,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
             run_amrfinder_flag=args.run_amrfinder,
             amrfinder_db=args.amrfinder_db,
             amr_report=args.amr_report,
+            include_ss=not args.no_ss,
+            ss_head=args.ss_head,
         )
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

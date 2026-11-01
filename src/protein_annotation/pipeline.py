@@ -10,7 +10,12 @@ import numpy as np
 from Bio import SeqIO
 
 from .amr import AmrHit, run_amrfinder
-from .embeddings import DEFAULT_ESM_MODEL, EmbeddingResult, embed_sequences
+from .embeddings import (
+    DEFAULT_ESM_MODEL,
+    EmbeddingResult,
+    ResidueEmbeddings,
+    embed_sequences_and_residues,
+)
 from .go_labels import parse_obo_ancestors
 from .hmmer import HmmerHit, run_phmmer, top_hit_per_query
 from .model import (
@@ -29,6 +34,13 @@ from .sequence import (
     compute_protparam_features,
     disorder_fraction,
 )
+from .structure import (
+    SSHeadWeights,
+    load_ss_head,
+    predict_ss3,
+    ss_composition,
+    ss_source,
+)
 
 # Exact TSV columns produced by the pipeline (CLI contract).
 TSV_COLUMNS: list[str] = [
@@ -41,8 +53,13 @@ TSV_COLUMNS: list[str] = [
     "Predicted_Function",
 ]
 
-# Opt-in extended columns (--extended-tsv): disorder signal + embedding provenance.
-EXTENDED_COLUMNS: list[str] = ["Disordered_Fraction", "Embedding_Source"]
+# Opt-in extended columns (--extended-tsv): disorder + embedding provenance + SS3.
+EXTENDED_COLUMNS: list[str] = [
+    "Disordered_Fraction",
+    "Embedding_Source",
+    "SS_Helix_Fraction",
+    "SS_Sheet_Fraction",
+]
 EXTENDED_TSV_COLUMNS: list[str] = TSV_COLUMNS + EXTENDED_COLUMNS
 
 
@@ -62,6 +79,10 @@ class AnnotationRecord:
     embedding_source: str = ""
     # True when Top_GO_Terms came from the homology-blended/smoothed scores.
     blended: bool = False
+    # SS3 helix/sheet fractions (None when --no-ss skips them).
+    ss_helix: float | None = None
+    ss_sheet: float | None = None
+    ss_source: str = ""
 
     def to_row(self, extended: bool = False) -> list[str]:
         """Serialise to TSV_COLUMNS order (plus extended cols when asked)."""
@@ -74,9 +95,11 @@ class AnnotationRecord:
             self.hmmer_hit,
             self.predicted_function,
         ]
-        if extended:  # Opt-in 9-column TSV; default stays 7-column compatible.
+        if extended:  # Opt-in 11-column TSV; default stays 7-column compatible.
             dis: str = f"{self.disordered_fraction:.3f}" if self.disordered_fraction is not None else "-"
-            row += [dis, self.embedding_source or "-"]
+            helix: str = f"{self.ss_helix:.3f}" if self.ss_helix is not None else "-"
+            sheet: str = f"{self.ss_sheet:.3f}" if self.ss_sheet is not None else "-"
+            row += [dis, self.embedding_source or "-", helix, sheet]
         return row
 
 
@@ -105,12 +128,17 @@ def annotate_records(
     homolog_go: dict[str, dict[str, float]] | None = None,
     blend_alpha: float = 1.0,
     obo_parents: dict[str, set[str]] | None = None,
+    include_ss: bool = True,
+    ss_weights: SSHeadWeights | None = None,
+    residue_embeddings: ResidueEmbeddings | None = None,
 ) -> list[AnnotationRecord]:
     """Combine ProtParam + embeddings + GO head + HMMER into records.
 
     Optional post-processing (all off by default, hence backward compatible):
     homolog-arm blending (alpha < 1 with `homolog_go` votes) and GO-DAG
     ancestor smoothing (`obo_parents`). Either sets record.blended = True.
+    SS3 fractions ride along when `include_ss` (head when `ss_weights` and
+    `residue_embeddings` fit, else the Chou-Fasman heuristic).
     """
     # Model input = ESM/hashed embedding concatenated with ProtParam vector.
     prot_vectors = np.array([f.to_vector() for f in features], dtype=np.float32)
@@ -143,6 +171,17 @@ def annotate_records(
         hit_str: str = hit.short() if hit else "-"
         # Offline disorder signal (pure CPU); None when --no-disorder skips it.
         dis: float | None = disorder_fraction(seq.cleaned) if include_disorder else None
+        # SS3 helix/sheet fractions; None when --no-ss skips them.
+        helix: float | None = None
+        sheet: float | None = None
+        ssource: str = ""
+        if include_ss:
+            res_repr = None
+            if residue_embeddings is not None and i < len(residue_embeddings.per_residue):
+                res_repr = residue_embeddings.per_residue[i]
+            comp = ss_composition(predict_ss3(seq.cleaned, res_repr, ss_weights))
+            helix, sheet = comp["H"], comp["E"]
+            ssource = ss_source(ss_weights, res_repr)
         records.append(
             AnnotationRecord(
                 protein_id=seq.record_id,
@@ -155,6 +194,9 @@ def annotate_records(
                 disordered_fraction=dis,
                 embedding_source=embedding.source,
                 blended=bool(blended_any or smoothed_any),
+                ss_helix=helix,
+                ss_sheet=sheet,
+                ss_source=ssource,
             )
         )
     return records
@@ -227,6 +269,8 @@ def run_pipeline(
     run_amrfinder_flag: bool = False,
     amrfinder_db: str | Path | None = None,
     amr_report: str | Path | None = None,
+    include_ss: bool = True,
+    ss_head: str | Path | None = None,
 ) -> list[AnnotationRecord]:
     """Full pipeline: parse -> clean -> ProtParam -> embed -> GO -> HMMER -> TSV.
 
@@ -239,7 +283,7 @@ def run_pipeline(
         force_fallback_embeddings: Skip ESM-2 (offline/CI mode).
         go_weights: Trained head bundle (save_weights stem/.json); None = demo.
         go_terms: Terms-only JSON label space; ignored when go_weights given.
-        extended_tsv: Write 9-column TSV (+disorder, embedding source).
+        extended_tsv: Write 11-column TSV (+disorder, source, SS fractions).
         include_disorder: Compute the offline disorder signal (False = skip).
         eval_labels: Labels TSV for the CAFA eval report (None = no eval).
         eval_report: JSON sidecar path for the CAFA report (needs eval_labels).
@@ -249,6 +293,8 @@ def run_pipeline(
         run_amrfinder_flag: Run the AMRFinderPlus AMR scan (graceful skip).
         amrfinder_db: AMRFinderPlus database dir (None = installed default).
         amr_report: Sidecar TSV path for AMR hits (needs run_amrfinder_flag).
+        include_ss: Compute per-residue SS3 helix/sheet fractions (False = skip).
+        ss_head: SS-head bundle path (None = default data/ss_head_8m.json).
 
     Returns:
         Annotation records (also written to output_tsv).
@@ -265,13 +311,19 @@ def run_pipeline(
     cleaned: list[CleanedSequence] = [clean_sequence(r.id, str(r.seq)) for r in parsed]
     # 2. ProtParam physicochemical features per sequence.
     features: list[ProtParamFeatures] = [compute_protparam_features(c) for c in cleaned]
-    # 3. ESM-2 (or hashed fallback) mean-pooled embeddings.
-    embedding: EmbeddingResult = embed_sequences(
+    # 3. ESM-2 (or hashed fallback) embeddings, pooled + per-residue in
+    # one forward pass; per-residue reps feed the SS3 head (None offline).
+    embedding: EmbeddingResult
+    residue_emb: ResidueEmbeddings
+    embedding, residue_emb = embed_sequences_and_residues(
         [c.cleaned for c in cleaned],
         [c.mask for c in cleaned],
         model_name=esm_model,
         force_fallback=force_fallback_embeddings,
     )
+    # 3b. SS3 head bundle (default data/ss_head_8m.json); warn-and-fallback
+    # to the heuristic when the file is missing or unusable.
+    ss_weights: SSHeadWeights | None = load_ss_head(ss_head) if include_ss else None
     fused_dim: int = embedding.dim + len(features[0].to_vector())
     # 4. Optional phmmer homology search (graceful skip when unavailable).
     # Keep the full hit list: top hits feed the TSV, all hits feed blending.
@@ -317,6 +369,9 @@ def run_pipeline(
         homolog_go=homolog_go,
         blend_alpha=blend_alpha,
         obo_parents=obo_parents,
+        include_ss=include_ss,
+        ss_weights=ss_weights,
+        residue_embeddings=residue_emb,
     )
     # 5d. Optional AMR sidecar (warn-and-skip without the scan flag).
     if amr_report is not None:
@@ -341,7 +396,7 @@ def run_pipeline(
             report_path = Path(eval_report)
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(_json.dumps(report, indent=2), encoding="utf-8")
-    # 7. Write TSV (default 7 columns; 9 with --extended-tsv).
+    # 7. Write TSV (default 7 columns; 11 with --extended-tsv).
     out_path = Path(output_tsv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as handle:

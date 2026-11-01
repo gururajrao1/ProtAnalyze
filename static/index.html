@@ -97,7 +97,8 @@
   <!-- Center: tabbed protein detail (Geneious-style viewer). -->
   <main id="main" class="detail" aria-label="Protein detail" tabindex="-1">
     <div id="empty" class="empty">
-      <h2>Annotate proteins to begin</h2>
+      <h2>Design with your protein data</h2>
+      <p class="muted">Annotate hypothetical bacterial proteins with ProtParam physicochemistry, ESM-2 embeddings, HMMER homology, and GO-term prediction.</p>
       <ol>
         <li>Upload a multi-FASTA file of hypothetical proteins, paste sequences, or load the demo.</li>
         <li>Choose embeddings (offline hashed for speed, ESM-2 for precision) and press Annotate.</li>
@@ -138,23 +139,28 @@
           <h3>Sequence viewer</h3>
           <span id="sel-readout" class="muted small" role="status">No selection</span>
           <span class="spacer"></span>
+          <label class="small"><input type="checkbox" id="ss-strip-toggle"> SS3 strip</label>
           <button id="copy-seq" class="btn secondary small" type="button">Copy sequence</button>
           <button id="copy-sel" class="btn secondary small" type="button" disabled>Copy selection</button>
         </div>
         <p class="muted small">Residues coloured by property. Click and drag to select a region; coordinates are 1-based.</p>
         <div id="seq-viewer" class="seq" aria-label="Annotated amino acid sequence"></div>
+        <div id="ss-strip" class="seq" aria-label="Secondary structure strip" hidden></div>
         <div class="legend" aria-label="Residue colour legend">
           <span class="chip hydrophobic">Hydrophobic</span>
           <span class="chip polar">Polar</span>
           <span class="chip positive">Positive</span>
           <span class="chip negative">Negative</span>
           <span class="chip special">Special / masked</span>
+          <span class="chip ss-h">H helix</span>
+          <span class="chip ss-e">E sheet</span>
+          <span class="chip ss-c">C coil</span>
         </div>
       </section>
 
       <section id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" hidden>
-        <h3>Hydrophobicity, charge and disorder</h3>
-        <p class="muted small">Kyte&ndash;Doolittle hydrophobicity (raw and 5-residue smoothed), per-residue charge, and IUPred3-style disorder propensity (dashed line marks the 0.5 disordered threshold). Hover for exact values.</p>
+        <h3>Hydrophobicity, charge, disorder and SS3</h3>
+        <p class="muted small">Kyte&ndash;Doolittle hydrophobicity (raw and 5-residue smoothed), per-residue charge, IUPred3-style disorder propensity (dashed line marks the 0.5 disordered threshold), and the SS3 secondary-structure track (H helix, E sheet, C coil). Hover for exact values.</p>
         <div id="tracks-chart"></div>
         <p id="tracks-fallback" class="muted" hidden>Charts need the Plotly CDN. Per-residue values remain available in the JSON export.</p>
       </section>

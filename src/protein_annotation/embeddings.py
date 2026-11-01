@@ -14,6 +14,9 @@ ESM_DIMS: dict[str, int] = {"esm2_t6_8M_UR50D": 320, "esm2_t33_650M_UR50D": 1280
 DEFAULT_ESM_MODEL: str = "esm2_t6_8M_UR50D"
 SUPPORTED_ESM_MODELS: tuple[str, str] = ("esm2_t6_8M_UR50D", "esm2_t33_650M_UR50D")
 
+# fair-esm positional-embedding cap; longer sequences clip defensively.
+ESM_MAX_RESIDUES: int = 1022
+
 
 @dataclass
 class EmbeddingResult:
@@ -21,6 +24,15 @@ class EmbeddingResult:
 
     embeddings: np.ndarray  # shape (n_sequences, dim)
     source: str  # e.g. "esm2:esm2_t6_8M_UR50D" or "hashed-fallback"
+    dim: int
+
+
+@dataclass
+class ResidueEmbeddings:
+    """Per-residue ESM-2 representations plus provenance."""
+
+    per_residue: list[np.ndarray | None]  # (len_i, dim) each; None = ESM miss
+    source: str  # e.g. "esm2:esm2_t6_8M_UR50D" or "unavailable"
     dim: int
 
 
@@ -55,13 +67,14 @@ def hashed_embedding(sequence: str, dim: int = 320) -> np.ndarray:
     return vec.astype(np.float32)
 
 
-def _try_esm_embed(
-    sequences: list[str], masks: list[list[bool]], model_name: str
-) -> np.ndarray | None:
-    """Attempt real ESM-2 mean-pooled embedding; return None on any failure.
+def _try_esm_forward(
+    sequences: list[str], model_name: str
+) -> tuple[list[np.ndarray], list[str]] | None:
+    """Run one ESM-2 forward pass; return per-residue reps + clipped seqs.
 
-    Mean pooling honours the validity mask so substituted ambiguous positions
-    contribute less: masked-out positions are excluded from the average.
+    Returns None on any failure (missing torch/esm, offline weights, hub
+    errors) so callers fall back gracefully. Residue slicing drops the
+    <cls>/<eos> framing tokens: reps[i] covers clipped[i] exactly.
     """
     try:
         import esm  # type: ignore[import-not-found]  # fair-esm package
@@ -75,28 +88,53 @@ def _try_esm_embed(
         model, alphabet = constructor()
         model.eval()
         batch_converter = alphabet.get_batch_converter()
-        # ESM truncates at 1022 residues; clip defensively.
-        clipped: list[str] = [s[:1022] if s else "A" for s in sequences]
+        clipped: list[str] = [s[:ESM_MAX_RESIDUES] if s else "A" for s in sequences]
         data: list[tuple[str, str]] = [(f"seq{i}", s) for i, s in enumerate(clipped)]
         _, _, tokens = batch_converter(data)
         n_layers: int = int(model.num_layers)
         with torch.no_grad():
             results = model(tokens, repr_layers=[n_layers], return_contacts=False)
         reps = results["representations"][n_layers].cpu().numpy()  # (B, L, D)
-        pooled: list[np.ndarray] = []
-        for i, seq in enumerate(clipped):
-            # Token 0 is <cls>, tokens 1..len are residues; exclude <eos>.
-            residue_reps: np.ndarray = reps[i, 1 : len(seq) + 1, :]
-            if i < len(masks) and len(masks[i]) >= len(seq) and any(masks[i][: len(seq)]):
-                # Mask-aware mean: average valid positions only.
-                valid = np.array(masks[i][: len(seq)], dtype=bool)
-                pooled.append(residue_reps[valid].mean(axis=0))
-            else:
-                pooled.append(residue_reps.mean(axis=0))
-        return np.stack(pooled).astype(np.float32)
+        # Token 0 is <cls>, tokens 1..len are residues; exclude <eos>.
+        per_residue: list[np.ndarray] = [
+            np.asarray(reps[i, 1 : len(seq) + 1, :], dtype=np.float32)
+            for i, seq in enumerate(clipped)
+        ]
+        return per_residue, clipped
     except Exception as exc:  # offline weights / hub failure -> fall back
         warnings.warn(f"ESM-2 inference failed ({exc}); using hashed fallback.")
         return None
+
+
+def _mask_aware_pool(
+    per_residue: list[np.ndarray], clipped: list[str], masks: list[list[bool]]
+) -> np.ndarray:
+    """Mean-pool per-residue reps honouring validity masks."""
+    pooled: list[np.ndarray] = []
+    for i, seq in enumerate(clipped):
+        residue_reps: np.ndarray = per_residue[i]
+        if i < len(masks) and len(masks[i]) >= len(seq) and any(masks[i][: len(seq)]):
+            # Mask-aware mean: average valid positions only.
+            valid = np.array(masks[i][: len(seq)], dtype=bool)
+            pooled.append(residue_reps[valid].mean(axis=0))
+        else:
+            pooled.append(residue_reps.mean(axis=0))
+    return np.stack(pooled).astype(np.float32)
+
+
+def _try_esm_embed(
+    sequences: list[str], masks: list[list[bool]], model_name: str
+) -> np.ndarray | None:
+    """Attempt real ESM-2 mean-pooled embedding; return None on any failure.
+
+    Mean pooling honours the validity mask so substituted ambiguous positions
+    contribute less: masked-out positions are excluded from the average.
+    """
+    forwarded = _try_esm_forward(sequences, model_name)
+    if forwarded is None:
+        return None
+    per_residue, clipped = forwarded
+    return _mask_aware_pool(per_residue, clipped, masks)
 
 
 def embed_sequences(
@@ -125,3 +163,34 @@ def embed_sequences(
     # Graceful fallback: ProtParam-independent deterministic hash vectors.
     fallback = np.stack([hashed_embedding(s, dim) for s in sequences]).astype(np.float32)
     return EmbeddingResult(embeddings=fallback, source="hashed-fallback", dim=dim)
+
+
+def embed_sequences_and_residues(
+    sequences: list[str],
+    masks: list[list[bool]] | None = None,
+    model_name: str = DEFAULT_ESM_MODEL,
+    force_fallback: bool = False,
+) -> tuple[EmbeddingResult, ResidueEmbeddings]:
+    """Embed with one shared ESM-2 forward pass (pooled + per-residue).
+
+    Same contract as :func:`embed_sequences`, plus unpooled residue
+    representations for per-residue heads (structure.py). When ESM-2 is
+    unavailable every per-residue entry is None and callers use
+    heuristic fallbacks; the pooled side still gets hashed vectors.
+    """
+    dim: int = embedding_dim(model_name)
+    masks = masks if masks is not None else [[True] * len(s) for s in sequences]
+    if not force_fallback:
+        forwarded = _try_esm_forward(sequences, model_name)
+        if forwarded is not None:
+            per_residue, clipped = forwarded
+            pooled = _mask_aware_pool(per_residue, clipped, masks)
+            return (
+                EmbeddingResult(embeddings=pooled, source=f"esm2:{model_name}", dim=dim),
+                ResidueEmbeddings(per_residue=per_residue, source=f"esm2:{model_name}", dim=dim),
+            )
+    fallback = np.stack([hashed_embedding(s, dim) for s in sequences]).astype(np.float32)
+    return (
+        EmbeddingResult(embeddings=fallback, source="hashed-fallback", dim=dim),
+        ResidueEmbeddings(per_residue=[None] * len(sequences), source="unavailable", dim=dim),
+    )

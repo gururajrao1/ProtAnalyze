@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from protein_annotation.amr import amr_available, hits_per_query, run_amrfinder
-from protein_annotation.embeddings import DEFAULT_ESM_MODEL, embed_sequences
+from protein_annotation.embeddings import DEFAULT_ESM_MODEL, embed_sequences_and_residues
 from protein_annotation.go_labels import parse_obo_ancestors
 from protein_annotation.hmmer import HmmerHit, hmmer_available, run_phmmer, top_hit_per_query
 from protein_annotation.model import (
@@ -56,6 +56,13 @@ from protein_annotation.sequence import (
     clean_sequence,
     compute_protparam_features,
     disorder_scores,
+)
+from protein_annotation.structure import (
+    load_ss_head,
+    predict_ss3,
+    ss_composition,
+    ss_head_available,
+    ss_source,
 )
 
 # Kyte-Doolittle hydrophobicity scale for per-residue tracks.
@@ -142,6 +149,7 @@ def annotate_fasta_text(
     blend_alpha: float = 1.0,
     obo_text: str | None = None,
     run_amrfinder_flag: bool = False,
+    include_ss: bool = True,
 ) -> tuple[list[AnnotationRecord], list[dict], dict | None, dict]:
     """Annotate FASTA text: TSV records + rich detail + CAFA eval + extras.
 
@@ -155,12 +163,14 @@ def annotate_fasta_text(
         raise ValueError("No FASTA records found in input")
     cleaned = [clean_sequence(r.id, str(r.seq)) for r in parsed]
     features = [compute_protparam_features(c) for c in cleaned]
-    embedding = embed_sequences(
+    embedding, residue_emb = embed_sequences_and_residues(
         [c.cleaned for c in cleaned],
         [c.mask for c in cleaned],
         model_name=esm_model,
         force_fallback=force_fallback,
     )
+    # SS3 head bundle (default data/ss_head_8m.json); None -> heuristic.
+    ss_weights = load_ss_head() if include_ss else None
     # Optional in-memory HMMER reference DB (temp files, graceful skip).
     # Full hit list is kept: top hits feed records, all hits feed blending.
     all_hits: list[HmmerHit] = []
@@ -210,6 +220,9 @@ def annotate_fasta_text(
         homolog_go=homolog_go,
         blend_alpha=blend_alpha,
         obo_parents=obo_parents,
+        include_ss=include_ss,
+        ss_weights=ss_weights,
+        residue_embeddings=residue_emb,
     )
 
     # Optional CAFA eval report over pasted labels TSV (protein_id<TAB>GO:1,GO:2).
@@ -234,6 +247,11 @@ def annotate_fasta_text(
         feat = features[i]
         rec = records[i]
         tracks = residue_tracks(seq.cleaned)
+        # Per-residue SS3 track (head when reps fit, else heuristic).
+        res_repr_i = residue_emb.per_residue[i] if i < len(residue_emb.per_residue) else None
+        ss3 = predict_ss3(seq.cleaned, res_repr_i, ss_weights) if include_ss else []
+        comp = ss_composition(ss3)
+        tracks["ss3"] = ss3
         go_terms = [
             {
                 "id": gid,
@@ -261,6 +279,12 @@ def annotate_fasta_text(
                 "disorder": [round(s, 3) for s in disorder_scores(seq.cleaned)],
                 "disordered_fraction": rec.disordered_fraction,
                 "embedding_source": rec.embedding_source,
+                "ss": {
+                    "helix_f": round(comp["H"], 4),
+                    "sheet_f": round(comp["E"], 4),
+                    "coil_f": round(comp["C"], 4),
+                    "source": ss_source(ss_weights, res_repr_i) if include_ss else "skipped",
+                },
                 "aa_freq": {k: round(float(v), 4) for k, v in sorted(feat.aa_freq.items())},
                 "go_terms": go_terms,
                 "hmmer": (
@@ -301,6 +325,11 @@ def annotate_fasta_text(
             "hits": sum(len(v) for v in amr_grouped.values()),
             "proteins_with_hits": len(amr_grouped),
         },
+        "ss": {
+            "head": ss_weights.esm_model if ss_weights is not None else None,
+            "head_file": ss_head_available(),
+            "active": bool(include_ss),
+        },
     }
     return records, detail, eval_report, extras
 
@@ -325,6 +354,7 @@ def health() -> dict:
         "go_terms": len(GO_IDS),
         "hmmer_available": hmmer_available(),
         "amrfinder_available": amr_available(),
+        "ss_head_available": ss_head_available(),
     }
 
 
@@ -341,6 +371,7 @@ async def annotate(
     top_k: int = Form(default=3),
     no_esm: bool = Form(default=True),
     esm_model: str = Form(default=DEFAULT_ESM_MODEL),
+    no_ss: bool = Form(default=False),
 ) -> JSONResponse:
     """Annotate uploaded FASTA (file or pasted text) -> JSON detail + TSV."""
     fasta_text = ""
@@ -365,6 +396,7 @@ async def annotate(
             blend_alpha=float(blend_alpha),
             obo_text=obo,
             run_amrfinder_flag=bool(run_amrfinder),
+            include_ss=not bool(no_ss),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -384,6 +416,7 @@ async def annotate(
         "eval": eval_report,
         "blend": extras["blend"],
         "amr": extras["amr"],
+        "ss": extras["ss"],
         "elapsed_s": time.perf_counter() - started,
     }
     return JSONResponse(

@@ -75,6 +75,9 @@ async function runAnnotate() {
   const status = $("status");
   showError(null);
   btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  const label = btn.textContent;
+  btn.textContent = "Annotating…";
   const t0 = performance.now();
   const timer = setInterval(() => {
     status.textContent = `Annotating… ${((performance.now() - t0) / 1000).toFixed(1)}s`;
@@ -118,6 +121,8 @@ async function runAnnotate() {
   } finally {
     clearInterval(timer);
     btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    btn.textContent = label;
   }
 }
 
@@ -135,6 +140,7 @@ function recordMatches(rec, q) {
 
 function renderList(filter) {
   const ul = $("protein-list");
+  const scrollTop = ul.scrollTop;
   ul.innerHTML = "";
   const visible = state.records
     .map((rec, i) => ({ rec, i }))
@@ -160,6 +166,7 @@ function renderList(filter) {
     li.onclick = () => selectProtein(i);
     ul.appendChild(li);
   }
+  ul.scrollTop = scrollTop;
 }
 
 function selectProtein(i) {
@@ -180,6 +187,10 @@ function renderDetail(rec) {
     : rec.embedding_source ? String(rec.embedding_source).replace("esm2:", "ESM-2 ") : "";
   const disBadge = (rec.disordered_fraction === null || rec.disordered_fraction === undefined) ? ""
     : `<span class="tag${rec.disordered_fraction >= 0.5 ? " warn" : ""}">disorder ${(rec.disordered_fraction * 100).toFixed(1)}%</span>`;
+  const ssBadge = (!rec.ss || rec.ss.source === "skipped") ? ""
+    : rec.ss.helix_f >= 0.5 ? `<span class="tag">mostly-helical ${(rec.ss.helix_f * 100).toFixed(0)}%</span>`
+    : rec.ss.sheet_f >= 0.3 ? `<span class="tag">sheet-rich ${(rec.ss.sheet_f * 100).toFixed(0)}%</span>`
+    : `<span class="tag">SS3 H${(rec.ss.helix_f * 100).toFixed(0)}/E${(rec.ss.sheet_f * 100).toFixed(0)}</span>`;
   $("prot-badges").innerHTML =
     `<span class="tag">${rec.length} aa</span>` +
     `<span class="tag">${rec.molecular_weight.toFixed(2)} Da</span>` +
@@ -187,6 +198,7 @@ function renderDetail(rec) {
     (rec.n_masked ? `<span class="tag">${rec.n_masked} masked</span>` : "") +
     (embLabel ? `<span class="tag">${esc(embLabel)}</span>` : "") +
     disBadge +
+    ssBadge +
     (rec.vfdb ? `<span class="tag vfdb">VFDB virulence hit</span>` : "") +
     (rec.blended ? `<span class="tag">blended scores</span>` : "") +
     (rec.amr && rec.amr.length ? `<span class="tag warn">${rec.amr.length} AMR hit${rec.amr.length === 1 ? "" : "s"}</span>` : "");
@@ -194,6 +206,7 @@ function renderDetail(rec) {
   renderGoTable(rec);
   renderProps(rec);
   renderSequence(rec);
+  renderSsStrip(rec);
   renderTracks(rec);
   renderComposition(rec);
   renderHmmer(rec);
@@ -236,6 +249,9 @@ function renderProps(rec) {
     ["Disordered fraction", (rec.disordered_fraction === null || rec.disordered_fraction === undefined)
       ? "n/a" : `${(rec.disordered_fraction * 100).toFixed(1)}%`],
     ["Embedding source", rec.embedding_source || "n/a"],
+    ["SS3 helix / sheet", (!rec.ss || rec.ss.source === "skipped")
+      ? "n/a" : `${(rec.ss.helix_f * 100).toFixed(1)}% / ${(rec.ss.sheet_f * 100).toFixed(1)}%`],
+    ["SS3 source", (rec.ss && rec.ss.source) || "n/a"],
   ];
   $("props-grid").innerHTML =
     rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("");
@@ -286,6 +302,7 @@ function renderProvenance() {
     ["CAFA eval", m.eval ? `Fmax ${m.eval.fmax} · Smin ${m.eval.smin} · AUPR ${m.eval.aupr_micro}` : "no labels supplied"],
     ["Homology blend", m.blend ? (m.blend.active ? `active (α=${m.blend.alpha}, map ${m.blend.map_targets}, OBO ${m.blend.obo_terms})` : `off (α=${m.blend.alpha})`) : "off"],
     ["AMR scan", m.amr ? (m.amr.requested ? (m.amr.available ? `${m.amr.hits} hits / ${m.amr.proteins_with_hits} proteins` : "requested, binary unavailable (skipped)") : "not requested") : "not requested"],
+    ["SS3 structure", m.ss ? (m.ss.active ? (m.ss.head ? `active (ESM-2 head ${m.ss.head})` : "active (heuristic fallback)") : "skipped (--no-ss)") : "n/a"],
     ["Server time", `${m.elapsed_s.toFixed(2)}s`],
   ];
   dl.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
@@ -375,6 +392,35 @@ function renderSequence(rec) {
   updateSelReadout();
 }
 
+/** Render the H/E/C letter strip under the sequence viewer (toggle-gated). */
+function renderSsStrip(rec) {
+  const strip = $("ss-strip");
+  const ss3 = rec.tracks && Array.isArray(rec.tracks.ss3) ? rec.tracks.ss3 : [];
+  strip.innerHTML = "";
+  strip.hidden = !$("ss-strip-toggle").checked || ss3.length !== rec.sequence.length;
+  if (strip.hidden) return;
+  const cls = { H: "ss-h", E: "ss-e", C: "ss-c" };
+  for (let s = 0; s < ss3.length; s += SEQ_WIDTH) {
+    const block = document.createElement("div");
+    block.className = "seq-block";
+    const row = document.createElement("div");
+    row.className = "seq-row";
+    const pos = document.createElement("span");
+    pos.className = "pos";
+    pos.textContent = s + 1;
+    row.appendChild(pos);
+    for (let i = s; i < Math.min(s + SEQ_WIDTH, ss3.length); i++) {
+      const sp = document.createElement("span");
+      sp.className = `aa ${cls[ss3[i]] || "ss-c"}`;
+      sp.textContent = ss3[i];
+      sp.title = `${ss3[i]}${i + 1}`;
+      row.appendChild(sp);
+    }
+    block.appendChild(row);
+    strip.appendChild(block);
+  }
+}
+
 function selectionRange() {
   if (selAnchor === null || selFocus === null) return null;
   const lo = Math.min(selAnchor, selFocus);
@@ -428,17 +474,21 @@ function renderTracks(rec) {
   withPlotly(() => {
     const x = rec.sequence.split("").map((_, i) => i + 1);
     const disorder = Array.isArray(rec.disorder) ? rec.disorder : [];
+    const ss3 = rec.tracks && Array.isArray(rec.tracks.ss3) ? rec.tracks.ss3 : [];
     const layout = {
       margin: { t: 20, l: 48, r: 12, b: 42 },
-      height: 520,
-      grid: { rows: 3, columns: 1, pattern: "independent" },
-      xaxis: { matches: "x3" },
-      yaxis: { title: "KD", domain: [0.68, 1] },
-      xaxis2: { matches: "x3" },
-      yaxis2: { title: "charge", domain: [0.4, 0.58], tickvals: [-1, 0, 1] },
-      xaxis3: { title: "position", anchor: "y3" },
-      yaxis3: { title: "disorder", domain: [0, 0.26], range: [0, 1] },
-      legend: { orientation: "h", y: 1.04 },
+      height: 660,
+      grid: { rows: 4, columns: 1, pattern: "independent" },
+      xaxis: { matches: "x4" },
+      yaxis: { title: "KD", domain: [0.77, 1] },
+      xaxis2: { matches: "x4" },
+      yaxis2: { title: "charge", domain: [0.58, 0.7], tickvals: [-1, 0, 1] },
+      xaxis3: { matches: "x4" },
+      yaxis3: { title: "disorder", domain: [0.32, 0.5], range: [0, 1] },
+      xaxis4: { title: "position", anchor: "y4" },
+      yaxis4: { title: "SS3", domain: [0, 0.22], tickvals: [0, 1, 2],
+        ticktext: ["C", "E", "H"], range: [-0.3, 2.3] },
+      legend: { orientation: "h", y: 1.03 },
       hovermode: "x unified",
     };
     const traces = [
@@ -456,6 +506,14 @@ function renderTracks(rec) {
         { x: [x[0], x[x.length - 1]], y: [0.5, 0.5], xaxis: "x3", yaxis: "y3",
           type: "scatter", mode: "lines", name: "disordered ≥ 0.5",
           line: { color: "#b4232a", width: 1, dash: "dash" } },
+      );
+    }
+    if (ss3.length === x.length) {
+      const code = { C: 0, E: 1, H: 2 };
+      traces.push(
+        { x, y: ss3.map((s) => code[s] ?? 0), xaxis: "x4", yaxis: "y4",
+          type: "scatter", mode: "lines", name: "SS3 (H/E/C)",
+          line: { color: "#6a3fc0", width: 2, shape: "hv" } },
       );
     }
     Plotly.newPlot("tracks-chart", traces, layout, { responsive: true, displaylogo: false });
@@ -484,6 +542,11 @@ function renderComposition(rec) {
 const TABS = ["overview", "sequence", "tracks", "composition"];
 
 function activateTab(name, focus) {
+  const detail = $("detail");
+  detail.classList.remove("tab-switch");
+  // Force reflow so the panel fade replays on every switch.
+  void detail.offsetWidth;
+  detail.classList.add("tab-switch");
   for (const t of TABS) {
     const tab = $(`tab-${t}`);
     const panel = $(`panel-${t}`);
@@ -538,7 +601,13 @@ $("demo-btn").onclick = () => {
   $("fasta-text").value = DEMO_FASTA;
   $("status").textContent = "Demo sequences loaded. Press Annotate.";
 };
-$("protein-filter").oninput = (e) => renderList(e.target.value);
+let filterTimer = null;
+$("protein-filter").oninput = (e) => {
+  // Debounce so fast typing does not rebuild the list on every keystroke.
+  clearTimeout(filterTimer);
+  const value = e.target.value;
+  filterTimer = setTimeout(() => renderList(value), 140);
+};
 $("protein-list").onkeydown = (e) => {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
   e.preventDefault();
@@ -556,6 +625,10 @@ document.querySelector(".tabs").onkeydown = (e) => {
   if (e.key === "ArrowRight") j = (i + 1) % TABS.length;
   if (e.key === "ArrowLeft") j = (i - 1 + TABS.length) % TABS.length;
   if (j !== null) { e.preventDefault(); activateTab(TABS[j], true); }
+};
+$("ss-strip-toggle").onchange = () => {
+  const rec = currentRecord();
+  if (rec) renderSsStrip(rec);
 };
 $("copy-seq").onclick = (e) => {
   const rec = currentRecord();

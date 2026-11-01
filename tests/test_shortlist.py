@@ -82,7 +82,7 @@ def test_pipeline_records_carry_offline_signals(tmp_path: Path) -> None:
 
 
 def test_extended_tsv_and_no_disorder(tmp_path: Path) -> None:
-    """--extended-tsv writes 9 cols; --no-disorder blanks the disorder cell."""
+    """--extended-tsv writes 11 cols; --no-disorder blanks the disorder cell."""
     out_ext: Path = tmp_path / "ext.tsv"
     records = run_pipeline(SAMPLE_FASTA, out_ext, force_fallback_embeddings=True, extended_tsv=True)
     assert len(records) == 6
