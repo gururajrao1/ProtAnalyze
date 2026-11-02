@@ -1,9 +1,3 @@
----
-title: Protein Annotation Workbench
-sdk: docker
-app_port: 7860
----
-
 # Protein Annotation Pipeline
 
 End-to-end CLI pipeline that annotates **hypothetical proteins** from FASTA.
@@ -41,6 +35,14 @@ pip install -r requirements.txt
 ```
 
 HMMER (`phmmer`) is optional and must come from your system package manager.
+
+## Deploy (zero cost)
+
+Render free tier via [render.yaml](/absolute/path/to/render.yaml): New+ →
+Web Service → connect this repo → keep the `free` plan → deploy. The service
+sleeps when idle (first request wakes it in ~1 min) and serves the workbench
+at its `https://protein-workbench.onrender.com`-style URL. `Dockerfile` /
+`.dockerignore` remain for container or paid Hugging Face Spaces use.
 
 ## Web workbench (unified app)
 
