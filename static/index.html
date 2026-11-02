@@ -7,6 +7,7 @@
 <meta name="description" content="Annotate hypothetical bacterial proteins: ProtParam physicochemistry, ESM-2 embeddings, HMMER homology and GO-term prediction.">
 <link rel="stylesheet" href="/static/styles.css">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.149.0/three.min.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to results</a>
@@ -121,6 +122,8 @@
         <button role="tab" id="tab-sequence" aria-controls="panel-sequence" aria-selected="false" tabindex="-1">Sequence</button>
         <button role="tab" id="tab-tracks" aria-controls="panel-tracks" aria-selected="false" tabindex="-1">Property tracks</button>
         <button role="tab" id="tab-composition" aria-controls="panel-composition" aria-selected="false" tabindex="-1">Composition</button>
+        <button role="tab" id="tab-landscape" aria-controls="panel-landscape" aria-selected="false" tabindex="-1">3D landscape</button>
+        <button role="tab" id="tab-structure" aria-controls="panel-structure" aria-selected="false" tabindex="-1">Structure</button>
       </div>
 
       <section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
@@ -172,6 +175,30 @@
           <thead><tr><th scope="col">Residue</th><th scope="col">Fraction</th><th scope="col">Count</th></tr></thead>
           <tbody></tbody>
         </table>
+      </section>
+
+      <section id="panel-landscape" role="tabpanel" aria-labelledby="tab-landscape" hidden>
+        <h3>Residue property landscape</h3>
+        <p class="muted small">Position along the chain (x), smoothed hydrophobicity (y), charge (z). Points glow by SS3 state: rose helix, sky sheet, grey coil. Drag to rotate.</p>
+        <div id="landscape-3d" aria-label="3D residue property landscape"></div>
+        <p id="landscape-fallback" class="muted" hidden>3D needs the Three.js CDN. Per-residue values remain available in the JSON export.</p>
+        <div class="legend" aria-label="SS3 colour legend">
+          <span class="chip ss-h">H helix</span>
+          <span class="chip ss-e">E sheet</span>
+          <span class="chip ss-c">C coil</span>
+        </div>
+      </section>
+
+      <section id="panel-structure" role="tabpanel" aria-labelledby="tab-structure" hidden>
+        <h3>Fold schematic</h3>
+        <p class="muted small">Schematic backbone trace generated from the predicted SS3 &mdash; helices coil, sheets pleat, coils wander. Shows the fold layout at a glance; not experimental coordinates. Blue sphere N-terminus, red sphere C-terminus. Drag to rotate.</p>
+        <div id="structure-3d" aria-label="3D schematic protein fold"></div>
+        <p id="structure-fallback" class="muted" hidden>3D needs the Three.js CDN. Per-residue values remain available in the JSON export.</p>
+        <div class="legend" aria-label="SS3 colour legend">
+          <span class="chip ss-h">H helix</span>
+          <span class="chip ss-e">E sheet</span>
+          <span class="chip ss-c">C coil</span>
+        </div>
       </section>
     </div>
   </main>

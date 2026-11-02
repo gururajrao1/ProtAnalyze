@@ -209,6 +209,8 @@ function renderDetail(rec) {
   renderSsStrip(rec);
   renderTracks(rec);
   renderComposition(rec);
+  renderLandscape(rec);
+  renderStructure(rec);
   renderHmmer(rec);
   // Refresh visible charts (Plotly needs a nudge when its tab was hidden).
   requestAnimationFrame(() => {
@@ -537,9 +539,140 @@ function renderComposition(rec) {
     `<td class="num">${Math.round(Number(vals[j]) * total)}</td></tr>`).join("");
 }
 
+/* ---------- 3D residue landscape (Three.js, optional CDN) ---------- */
+
+let landscape = null; // { renderer, raf, group, spinning } while mounted
+let landscapeLoadHook = false;
+
+function disposeLandscape() {
+  if (!landscape) return;
+  cancelAnimationFrame(landscape.raf);
+  if (landscape.renderer) landscape.renderer.dispose();
+  const el = $("landscape-3d");
+  if (el) el.innerHTML = "";
+  landscape = null;
+}
+
+/** Soft round sprite so points read as glowing dots, not hard squares. */
+function landscapeSprite() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.4, "rgba(255,255,255,0.8)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+function ssColor(s) {
+  if (s === "H") return new THREE.Color("#ff9ebb");
+  if (s === "E") return new THREE.Color("#7cc4ff");
+  return new THREE.Color("#93a3ae");
+}
+
+/**
+ * Residue property landscape: chain position (x), smoothed KD
+ * hydrophobicity (y), charge (z); points glow by SS3 state with a faint
+ * backbone thread. Drag to rotate; gentle auto-spin unless reduced motion.
+ */
+function renderLandscape(rec) {
+  const fallback = $("landscape-fallback");
+  disposeLandscape();
+  if (typeof THREE === "undefined") {
+    // Retry once after full page load (deferred CDN script), else fallback.
+    if (!landscapeLoadHook) {
+      landscapeLoadHook = true;
+      window.addEventListener("load", () => {
+        if (typeof THREE !== "undefined") {
+          fallback.hidden = true;
+          if (!$("panel-landscape").hidden) renderLandscape(currentRecord());
+        } else fallback.hidden = false;
+      }, { once: true });
+    }
+    fallback.hidden = false;
+    return;
+  }
+  fallback.hidden = true;
+  const el = $("landscape-3d");
+  // Hidden tab has no width yet; render when the tab is activated instead.
+  if (!el || el.clientWidth === 0) return;
+  const n = rec.sequence.length;
+  if (!n) return;
+  const hydro = rec.tracks.hydro_smooth;
+  const charge = rec.tracks.charge;
+  const ss3 = (rec.tracks && Array.isArray(rec.tracks.ss3)) ? rec.tracks.ss3 : [];
+  if (hydro.length !== n || charge.length !== n) return;
+
+  const W = el.clientWidth, H = 420;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(W, H);
+  el.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
+  camera.position.set(0, 2.6, 11.5);
+  camera.lookAt(0, 0.2, 0);
+
+  const group = new THREE.Group();
+  const pos = new Float32Array(n * 3);
+  const col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const x = (n === 1 ? 0 : i / (n - 1) - 0.5) * 8;
+    pos[i * 3] = x;
+    pos[i * 3 + 1] = hydro[i] / 1.4;
+    pos[i * 3 + 2] = charge[i] * 2.5;
+    const c = ssColor(ss3[i]);
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  const dots = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: 0.3, map: landscapeSprite(), vertexColors: true,
+    transparent: true, depthWrite: false, sizeAttenuation: true,
+  }));
+  const thread = new THREE.Line(geo, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.45,
+  }));
+  group.add(thread);
+  group.add(dots);
+  scene.add(group);
+
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let dragging = false, px = 0, py = 0;
+  renderer.domElement.style.touchAction = "none";
+  renderer.domElement.addEventListener("pointerdown", (e) => {
+    dragging = true; px = e.clientX; py = e.clientY;
+    renderer.domElement.setPointerCapture(e.pointerId);
+  });
+  renderer.domElement.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    group.rotation.y += (e.clientX - px) * 0.006;
+    group.rotation.x = Math.max(-1.2, Math.min(1.2, group.rotation.x + (e.clientY - py) * 0.006));
+    px = e.clientX; py = e.clientY;
+  });
+  const stopDrag = () => { dragging = false; };
+  renderer.domElement.addEventListener("pointerup", stopDrag);
+  renderer.domElement.addEventListener("pointercancel", stopDrag);
+
+  const clock = new THREE.Clock();
+  const st = { renderer, raf: 0, group, camera };
+  landscape = st;
+  (function tick() {
+    st.raf = requestAnimationFrame(tick);
+    if (!reduceMotion && !dragging) group.rotation.y += clock.getDelta() * 0.22;
+    else clock.getDelta();
+    renderer.render(scene, camera);
+  })();
+}
+
 /* ---------- tabs ---------- */
 
-const TABS = ["overview", "sequence", "tracks", "composition"];
+const TABS = ["overview", "sequence", "tracks", "composition", "landscape", "structure"];
 
 function activateTab(name, focus) {
   const detail = $("detail");
@@ -556,6 +689,9 @@ function activateTab(name, focus) {
     panel.hidden = !on;
     if (on && focus) tab.focus();
   }
+  // The 3D tabs render lazily: hidden tabs have no width to size to.
+  if (name === "landscape") renderLandscape(currentRecord());
+  if (name === "structure") renderStructure(currentRecord());
   // Charts in a newly shown tab need a resize nudge.
   requestAnimationFrame(() => {
     if (typeof Plotly === "undefined") return;
@@ -617,6 +753,158 @@ $("protein-list").onkeydown = (e) => {
 };
 for (const t of TABS) {
   $(`tab-${t}`).onclick = () => activateTab(t, false);
+}
+window.addEventListener("resize", () => {
+  if (landscape && !$("panel-landscape").hidden) {
+    const w = $("landscape-3d").clientWidth;
+    if (w) {
+      landscape.camera.aspect = w / 420;
+      landscape.camera.updateProjectionMatrix();
+      landscape.renderer.setSize(w, 420);
+    }
+  }
+  if (structure3d && !$("panel-structure").hidden) {
+    const w = $("structure-3d").clientWidth;
+    if (w) {
+      structure3d.camera.aspect = w / 420;
+      structure3d.camera.updateProjectionMatrix();
+      structure3d.renderer.setSize(w, 420);
+    }
+  }
+});
+
+/* ---------- 3D fold schematic (SS3 trace, not atomic coordinates) ---------- */
+
+let structure3d = null;
+let structureLoadHook = false;
+
+function disposeStructure() {
+  if (!structure3d) return;
+  cancelAnimationFrame(structure3d.raf);
+  if (structure3d.renderer) structure3d.renderer.dispose();
+  const el = $("structure-3d");
+  if (el) el.innerHTML = "";
+  structure3d = null;
+}
+
+/**
+ * Pseudo-C-alpha layout from the SS3 string: helix residues spiral
+ * (3.6 per turn), sheet residues pleat up/down, coil wanders gently.
+ * Schematic only — it shows fold layout, not measured coordinates.
+ */
+function tracePoints(n, ss3) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const s = ss3[i] || "C";
+    const x = (n === 1 ? 0 : i / (n - 1) - 0.5) * n * 0.3;
+    let y, z;
+    if (s === "H") {
+      const a = i * (Math.PI * 2 / 3.6);
+      y = Math.sin(a); z = Math.cos(a);
+    } else if (s === "E") {
+      y = (i % 2 === 0 ? 0.7 : -0.7); z = 0;
+    } else {
+      y = Math.sin(i * 0.7) * 0.35; z = Math.cos(i * 0.5) * 0.35;
+    }
+    pts.push(new THREE.Vector3(x, y, z));
+  }
+  return pts;
+}
+
+function renderStructure(rec) {
+  const fallback = $("structure-fallback");
+  disposeStructure();
+  if (typeof THREE === "undefined") {
+    if (!structureLoadHook) {
+      structureLoadHook = true;
+      window.addEventListener("load", () => {
+        if (typeof THREE !== "undefined") {
+          fallback.hidden = true;
+          if (!$("panel-structure").hidden) renderStructure(currentRecord());
+        } else fallback.hidden = false;
+      }, { once: true });
+    }
+    fallback.hidden = false;
+    return;
+  }
+  fallback.hidden = true;
+  const el = $("structure-3d");
+  if (!el || el.clientWidth === 0) return;
+  const n = rec.sequence.length;
+  if (n < 2) return;
+  const ss3 = (rec.tracks && Array.isArray(rec.tracks.ss3)) ? rec.tracks.ss3 : [];
+  const pts = tracePoints(n, ss3);
+
+  const W = el.clientWidth, H = 420;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(W, H);
+  el.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+  const key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(5, 8, 6);
+  scene.add(key);
+  const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 200);
+  const span = n * 0.3;
+  camera.position.set(0, span * 0.18, span * 0.9 + 6);
+  camera.lookAt(0, 0, 0);
+
+  const group = new THREE.Group();
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const tub = Math.max(24, n * 6), rad = 10;
+  const geo = new THREE.TubeGeometry(curve, tub, 0.16, rad, false);
+  // One colour per tubular ring, from the nearest residue's SS3 state.
+  const count = geo.attributes.position.count;
+  const col = new Float32Array(count * 3);
+  const ringSize = rad + 1;
+  for (let v = 0; v < count; v++) {
+    const ring = Math.floor(v / ringSize);
+    const ri = Math.min(n - 1, Math.round(ring / tub * (n - 1)));
+    const c = ssColor(ss3[ri]);
+    col[v * 3] = c.r; col[v * 3 + 1] = c.g; col[v * 3 + 2] = c.b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  group.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.35, metalness: 0.1,
+  })));
+  // Termini markers: blue N, red C.
+  const cap = new THREE.SphereGeometry(0.32, 16, 16);
+  const nTerm = new THREE.Mesh(cap, new THREE.MeshBasicMaterial({ color: 0x22d3ee }));
+  nTerm.position.copy(pts[0]);
+  const cTerm = new THREE.Mesh(cap, new THREE.MeshBasicMaterial({ color: 0xf87171 }));
+  cTerm.position.copy(pts[n - 1]);
+  group.add(nTerm);
+  group.add(cTerm);
+  scene.add(group);
+
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let dragging = false, px = 0, py = 0;
+  renderer.domElement.style.touchAction = "none";
+  renderer.domElement.addEventListener("pointerdown", (e) => {
+    dragging = true; px = e.clientX; py = e.clientY;
+    renderer.domElement.setPointerCapture(e.pointerId);
+  });
+  renderer.domElement.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    group.rotation.y += (e.clientX - px) * 0.006;
+    group.rotation.x = Math.max(-1.2, Math.min(1.2, group.rotation.x + (e.clientY - py) * 0.006));
+    px = e.clientX; py = e.clientY;
+  });
+  const stopDrag = () => { dragging = false; };
+  renderer.domElement.addEventListener("pointerup", stopDrag);
+  renderer.domElement.addEventListener("pointercancel", stopDrag);
+
+  const clock = new THREE.Clock();
+  const st = { renderer, raf: 0, group, camera };
+  structure3d = st;
+  (function tick() {
+    st.raf = requestAnimationFrame(tick);
+    if (!reduceMotion && !dragging) group.rotation.y += clock.getDelta() * 0.22;
+    else clock.getDelta();
+    renderer.render(scene, camera);
+  })();
 }
 document.querySelector(".tabs").onkeydown = (e) => {
   const i = TABS.findIndex((t) => $(`tab-${t}`) === document.activeElement);

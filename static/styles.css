@@ -263,6 +263,18 @@ table.data a { color: var(--link); }
 #ss-strip { margin-top: 0.4rem; }
 #ss-strip .aa { cursor: default; }
 
+/* 3D wells: fixed-height console; canvas fills it. */
+#landscape-3d,
+#structure-3d {
+  height: 420px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--console); box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+#landscape-3d canvas,
+#structure-3d canvas { display: block; cursor: grab; }
+#landscape-3d canvas:active,
+#structure-3d canvas:active { cursor: grabbing; }
+
 /* Status bar: console footer with a live glow dot on the summary */
 .statusbar {
   display: flex; justify-content: space-between; gap: 1rem; align-items: center;
