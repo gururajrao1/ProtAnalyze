@@ -1,0 +1,18 @@
+.git
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# Big regenerable downloads stay out of the image; the app falls back
+# gracefully without them (hashed embeddings, heuristic SS, skipped tools).
+data/go-basic.obo
+data/uniprot_bacterial_go.tsv
+data/ss_labels.jsonl
+data/*.pt
+data/*.pth
+protein_annotations.tsv
+*.tbl
+*.tblout
+*.log
+.ipynb_checkpoints/

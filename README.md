@@ -1,3 +1,9 @@
+---
+title: Protein Annotation Workbench
+sdk: docker
+app_port: 7860
+---
+
 # Protein Annotation Pipeline
 
 End-to-end CLI pipeline that annotates **hypothetical proteins** from FASTA.
