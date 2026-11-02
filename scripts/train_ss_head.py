@@ -33,6 +33,7 @@ from protein_annotation.embeddings import _try_esm_forward  # noqa: E402
 from protein_annotation.structure import (  # noqa: E402
     SS3_LABELS,
     SSHeadWeights,
+    fold_standardisation,
     predict_ss3_head,
     ss_accuracy,
 )
@@ -116,9 +117,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head-out", default="data/ss_head_8m.json", help="Head bundle path.")
     parser.add_argument("--report-out", default="data/ss_train_report.json", help="Report path.")
     parser.add_argument("--window", type=int, default=7, help="One-sided context width.")
-    parser.add_argument("--epochs", type=int, default=30, help="Adam epochs.")
+    parser.add_argument("--epochs", type=int, default=100, help="Adam epochs.")
     parser.add_argument("--lr", type=float, default=3e-3, help="Adam learning rate.")
-    parser.add_argument("--batch-size", type=int, default=4096, help="Minibatch rows.")
+    parser.add_argument("--batch-size", type=int, default=2048, help="Minibatch rows.")
     parser.add_argument("--seed", type=int, default=0, help="Deterministic seed.")
     parser.add_argument("--esm-model", default="esm2_t6_8M_UR50D", help="ESM checkpoint.")
     args = parser.parse_args(argv)
@@ -153,8 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     sd[sd < 1e-6] = 1.0
     W, b = fit_probe_torch((X_train - mu) / sd, y_train, args.epochs, args.lr,
                            args.batch_size, args.seed)
-    W = W / sd[:, None]
-    b = b - (mu / sd) @ W
+    W, b = fold_standardisation(W, b, mu, sd)
 
     head = SSHeadWeights(dim=dim, window=args.window, labels=list(SS3_LABELS),
                          weights=W.tolist(), bias=b.tolist(),

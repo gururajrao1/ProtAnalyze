@@ -21,6 +21,7 @@ from protein_annotation.pipeline import EXTENDED_TSV_COLUMNS, run_pipeline  # no
 from protein_annotation.structure import (  # noqa: E402
     SS3_LABELS,
     SSHeadWeights,
+    fold_standardisation,
     load_ss_head,
     predict_ss3,
     predict_ss3_head,
@@ -86,6 +87,27 @@ def test_head_bundle_roundtrip_and_forward_shape(tmp_path: Path) -> None:
                                 ' "weights": [], "bias": []}')
 
 
+def test_fold_standardisation_matches_unscaled_forward() -> None:
+    """Folded head equals the manual standardised forward (no double-divide).
+
+    Regression test for the bias-folding bug: scaling ``W`` by ``sd``
+    before adjusting ``b`` with it divides the bias term by ``sd`` twice
+    and silently collapses Q3 to majority-class level.
+    """
+    rng = np.random.RandomState(7)
+    w = rng.randn(12, 3)
+    b = rng.randn(3)
+    mu = rng.randn(12)
+    sd = rng.rand(12) + 0.5  # strictly positive, no zero-guard path.
+    x = rng.randn(5, 12)
+    w_folded, b_folded = fold_standardisation(w, b, mu, sd)
+    assert w_folded.shape == (12, 3)
+    assert b_folded.shape == (3,)
+    np.testing.assert_allclose(
+        x @ w_folded + b_folded, ((x - mu) / sd) @ w + b, rtol=1e-9, atol=1e-12
+    )
+
+
 def test_q3_on_pinned_fixture() -> None:
     """Shipped head scores Q3 >= 0.70 on the pinned held-out fixture.
 
@@ -122,8 +144,10 @@ def test_extended_tsv_ss_columns(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     assert len(rows[0]) == len(EXTENDED_TSV_COLUMNS) == 11
     for row, rec in zip(rows, records):
-        assert float(row["SS_Helix_Fraction"]) == pytest.approx(rec.ss_helix)
-        assert float(row["SS_Sheet_Fraction"]) == pytest.approx(rec.ss_sheet)
+        # TSV cells are 3-decimal, so they cannot round-trip to approx's
+        # default 1e-6 relative tolerance; 1e-3 matches the format.
+        assert float(row["SS_Helix_Fraction"]) == pytest.approx(rec.ss_helix, abs=1e-3)
+        assert float(row["SS_Sheet_Fraction"]) == pytest.approx(rec.ss_sheet, abs=1e-3)
         assert 0.0 <= float(row["SS_Helix_Fraction"]) <= 1.0
         assert 0.0 <= float(row["SS_Sheet_Fraction"]) <= 1.0
     # Skip path: --no-ss leaves fractions None and TSV cells "-".

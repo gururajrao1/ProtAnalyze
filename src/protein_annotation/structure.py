@@ -205,6 +205,38 @@ def predict_ss3_heuristic(
     return out
 
 
+def fold_standardisation(
+    weights: np.ndarray, bias: np.ndarray, mean: np.ndarray, std: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fold feature standardisation into a linear head.
+
+    The probe trains on ``(x - mu) / sd`` as ``z @ W + b``; folding lets
+    inference stay a pure ``x @ W_folded + b_folded`` with no scaler::
+
+        x @ (W / sd) + (b - (mu / sd) @ W)
+
+    The bias MUST use the unscaled ``W`` — scaling ``W`` first and then
+    adjusting ``b`` with it double-divides by ``sd`` and silently breaks
+    every prediction (observed as Q3 collapsing to majority-class level).
+
+    Args:
+        weights: Trained ``(d, 3)`` matrix on standardised features.
+        bias: Trained ``(3,)`` vector.
+        mean: Per-feature training mean ``(d,)``.
+        std: Per-feature training std ``(d,)`` (entries near zero are
+            treated as 1.0 upstream, so no zeros reach this function).
+
+    Returns:
+        ``(W_folded, b_folded)`` ready to store in :class:`SSHeadWeights`.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    b = np.asarray(bias, dtype=np.float64)
+    mu = np.asarray(mean, dtype=np.float64)
+    sd = np.asarray(std, dtype=np.float64)
+    b_folded = b - (mu / sd) @ w
+    return w / sd[:, None], b_folded
+
+
 def predict_ss3_head(res_repr: np.ndarray, weights: SSHeadWeights) -> list[str]:
     """Numpy forward of the windowed linear probe over per-residue reps.
 
